@@ -1,24 +1,21 @@
 import { serve } from "https://deno.land/std@0.182.0/http/server.ts";
 
-// Aapke dwara di gayi API Key
 const GEMINI_API_KEY = "AIzaSyAn_AV2_WQiOdUAEzUGoKrJH-adMsVlWC4";
-const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${GEMINI_API_KEY}`;
+const API_URL = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-pro:generateContent?key=${GEMINI_API_KEY}`;
 
-// CORS headers, taaki PHP server isse connect kar sake
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
-async function handler(req: Request): Promise<Response> {
-  // CORS preflight request ko handle karna
+async function handler(req) {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
   if (req.method !== "POST") {
-    return new Response(JSON.stringify({ error: "Sirf POST requests allowed hain" }), {
+    return new Response(JSON.stringify({ error: "Only POST allowed" }), {
       status: 405,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
@@ -26,54 +23,45 @@ async function handler(req: Request): Promise<Response> {
 
   try {
     const { message } = await req.json();
-
-    if (!message || typeof message !== "string") {
-      return new Response(JSON.stringify({ error: "Message khali nahi ho sakta" }), {
+    if (!message) {
+      return new Response(JSON.stringify({ error: "Message required" }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    // Gemini API ke liye request body taiyar karna
-    const geminiPayload = {
-      contents: [
-        {
-          parts: [{ text: message }],
-        },
-      ],
+    const body = {
+      contents: [{ parts: [{ text: message }] }],
     };
 
-    // Gemini API ko call karna
-    const geminiResponse = await fetch(API_URL, {
+    const res = await fetch(API_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(geminiPayload),
+      body: JSON.stringify(body),
     });
 
-    if (!geminiResponse.ok) {
-        const errorBody = await geminiResponse.text();
-        console.error("Gemini API Error:", errorBody);
-        return new Response(JSON.stringify({ error: "Gemini API se response nahi mila", details: errorBody }), {
-            status: geminiResponse.status,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-    }
-    
-    const geminiData = await geminiResponse.json();
-    
-    // API response se text nikalna
-    const textResponse = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text || "Maaf kijiye, main iska jawab nahi de pa raha hoon.";
+    const data = await res.json();
 
-    // PHP proxy ko jawab bhejna
-    return new Response(JSON.stringify({ response: textResponse }), {
+    if (!res.ok) {
+      console.error("Gemini error:", data);
+      return new Response(JSON.stringify({ error: "Gemini API failed", details: data }), {
+        status: res.status,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    const text =
+      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      "Maaf kijiye, koi jawab nahi mil paaya.";
+
+    return new Response(JSON.stringify({ response: text }), {
       status: 200,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
-
-  } catch (error) {
-    console.error("Server Error:", error);
+  } catch (err) {
+    console.error("Server error:", err);
     return new Response(JSON.stringify({ error: "Internal server error" }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -81,5 +69,5 @@ async function handler(req: Request): Promise<Response> {
   }
 }
 
-console.log("Deno server http://localhost:8000 par chal raha hai...");
+console.log("Server running on http://localhost:8000");
 await serve(handler, { port: 8000 });
