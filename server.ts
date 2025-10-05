@@ -1,7 +1,7 @@
 import { serve } from "https://deno.land/std@0.182.0/http/server.ts";
 
 // Aapke dwara di gayi API Key
-const GEMINI_API_KEY = "AIzaSyAn_AV2_WQiOdUAEzUGoKrJH-adMsVIWC4";
+const GEMINI_API_KEY = "AIzaSyAn_AV2_WQiOdUAEzUGoKrJH-adMsVlWC4";
 const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${GEMINI_API_KEY}`;
 
 // CORS headers, taaki PHP server isse connect kar sake
