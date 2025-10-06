@@ -1,11 +1,12 @@
 import { serve } from "https://deno.land/std@0.182.0/http/server.ts";
 
-// 🔑 Your Gemini API Key
+// ✅ Your Gemini API key
 const GEMINI_API_KEY = "AIzaSyAn_AV2_WQiOdUAEzUGoKrJH-adMsVlWC4";
 
-// ✅ Correct API endpoint and model name
+// ✅ Correct API endpoint and model
 const API_URL = `https://generativelanguage.googleapis.com/v1beta1/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
 
+// ✅ CORS config
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -13,12 +14,11 @@ const corsHeaders = {
 };
 
 async function handler(req) {
-  // ✅ Handle CORS
+  // ✅ Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
-  // ✅ Only POST allowed
   if (req.method !== "POST") {
     return new Response(JSON.stringify({ error: "Only POST requests allowed" }), {
       status: 405,
@@ -27,7 +27,6 @@ async function handler(req) {
   }
 
   try {
-    // ✅ Parse input
     const { message } = await req.json();
     if (!message || typeof message !== "string" || message.trim() === "") {
       return new Response(JSON.stringify({ error: "Message required" }), {
@@ -36,10 +35,11 @@ async function handler(req) {
       });
     }
 
-    // ✅ Prepare Gemini request body
+    // ✅ Proper Gemini API request body
     const payload = {
       contents: [
         {
+          role: "user",
           parts: [{ text: message }],
         },
       ],
@@ -48,17 +48,23 @@ async function handler(req) {
     // ✅ Call Gemini API
     const response = await fetch(API_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify(payload),
     });
 
-    const textResponse = await response.text();
+    const rawText = await response.text();
 
-    // ✅ Handle empty/invalid response
-    if (!textResponse) {
-      console.error("Gemini returned empty response");
+    // 🧩 Debug logging (helps track if response is empty)
+    console.log("🔍 Raw Gemini response:", rawText);
+
+    if (!rawText || rawText.trim() === "") {
       return new Response(
-        JSON.stringify({ error: "Empty response from Gemini API" }),
+        JSON.stringify({
+          error: "Gemini returned empty response",
+          hint: "Check if model name and payload format are correct.",
+        }),
         {
           status: 502,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -66,14 +72,13 @@ async function handler(req) {
       );
     }
 
-    // ✅ Try parsing JSON
     let data;
     try {
-      data = JSON.parse(textResponse);
+      data = JSON.parse(rawText);
     } catch (err) {
-      console.error("Invalid JSON from Gemini:", textResponse);
+      console.error("❌ JSON parse error:", err, "Raw:", rawText);
       return new Response(
-        JSON.stringify({ error: "Invalid JSON response from Gemini", raw: textResponse }),
+        JSON.stringify({ error: "Invalid JSON response from Gemini", raw: rawText }),
         {
           status: 500,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -81,26 +86,28 @@ async function handler(req) {
       );
     }
 
-    // ✅ If Gemini error
     if (!response.ok) {
-      console.error("Gemini API Error:", data);
-      return new Response(JSON.stringify({ error: "Gemini API failed", details: data }), {
-        status: response.status,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      console.error("❌ Gemini API Error:", data);
+      return new Response(
+        JSON.stringify({ error: "Gemini API failed", details: data }),
+        {
+          status: response.status,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        }
+      );
     }
 
-    // ✅ Extract the actual response text
+    // ✅ Extract AI message
     const output =
       data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      "Maaf kijiye, koi jawab nahi mil paaya.";
+      "Maaf kijiye, Gemini ne koi jawab nahi diya.";
 
     return new Response(JSON.stringify({ response: output }), {
       status: 200,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (error) {
-    console.error("Server error:", error);
+    console.error("💥 Server error:", error);
     return new Response(JSON.stringify({ error: "Internal server error" }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -108,5 +115,5 @@ async function handler(req) {
   }
 }
 
-console.log("✅ Deno server running on http://localhost:8000");
+console.log("✅ Deno server running at http://localhost:8000");
 await serve(handler, { port: 8000 });
