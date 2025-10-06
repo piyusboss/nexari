@@ -1,10 +1,15 @@
-import { serve } from "https://deno.land/std@0.182.0/http/server.ts";
+import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-// ✅ Your Gemini API key
-const GEMINI_API_KEY = "AIzaSyAn_AV2_WQiOdUAEzUGoKrJH-adMsVlWC4";
+// 🔐 API key ko environment variable se securely load karein
+const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
 
-// ✅ Correct API endpoint and model
-const API_URL = `https://generativelanguage.googleapis.com/v1beta1/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+if (!GEMINI_API_KEY) {
+  console.error("❌ Error: GEMINI_API_KEY environment variable not set!");
+  Deno.exit(1); // Server ko band kar dein agar key nahi hai
+}
+
+// ✅ Sahi API endpoint aur model ka naam
+const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_API_KEY}`;
 
 // ✅ CORS config
 const corsHeaders = {
@@ -13,7 +18,7 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
-async function handler(req) {
+async function handler(req: Request) {
   // ✅ Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -116,4 +121,5 @@ async function handler(req) {
 }
 
 console.log("✅ Deno server running at http://localhost:8000");
-await serve(handler, { port: 8000 });
+serve(handler, { port: 8000 });
+
