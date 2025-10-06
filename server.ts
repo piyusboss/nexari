@@ -5,11 +5,12 @@ const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
 
 if (!GEMINI_API_KEY) {
   console.error("❌ Error: GEMINI_API_KEY environment variable not set!");
-  Deno.exit(1); // Server ko band kar dein agar key nahi hai
+  Deno.exit(1);
 }
 
-// ✅ Sahi API endpoint aur model ka naam
-const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_API_KEY}`;
+// ✅✅✅ YAHAN BADLAAV KIYA GAYA HAI ✅✅✅
+// Model ko 'gemini-1.5-flash-latest' se badal kar 'gemini-pro' kar diya gaya hai
+const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${GEMINI_API_KEY}`;
 
 // ✅ CORS config
 const corsHeaders = {
@@ -19,7 +20,7 @@ const corsHeaders = {
 };
 
 async function handler(req: Request) {
-  // ✅ Handle CORS preflight
+  // Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
@@ -40,7 +41,7 @@ async function handler(req: Request) {
       });
     }
 
-    // ✅ Proper Gemini API request body
+    // Proper Gemini API request body
     const payload = {
       contents: [
         {
@@ -50,7 +51,7 @@ async function handler(req: Request) {
       ],
     };
 
-    // ✅ Call Gemini API
+    // Call Gemini API
     const response = await fetch(API_URL, {
       method: "POST",
       headers: {
@@ -60,49 +61,26 @@ async function handler(req: Request) {
     });
 
     const rawText = await response.text();
-
-    // 🧩 Debug logging (helps track if response is empty)
-    console.log("🔍 Raw Gemini response:", rawText);
+    console.log("🔍 Raw Gemini response:", rawText); // Debug logging
 
     if (!rawText || rawText.trim() === "") {
       return new Response(
-        JSON.stringify({
-          error: "Gemini returned empty response",
-          hint: "Check if model name and payload format are correct.",
-        }),
-        {
-          status: 502,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        }
+        JSON.stringify({ error: "Gemini returned empty response" }),
+        { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    let data;
-    try {
-      data = JSON.parse(rawText);
-    } catch (err) {
-      console.error("❌ JSON parse error:", err, "Raw:", rawText);
-      return new Response(
-        JSON.stringify({ error: "Invalid JSON response from Gemini", raw: rawText }),
-        {
-          status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        }
-      );
-    }
+    const data = JSON.parse(rawText);
 
     if (!response.ok) {
       console.error("❌ Gemini API Error:", data);
       return new Response(
         JSON.stringify({ error: "Gemini API failed", details: data }),
-        {
-          status: response.status,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        }
+        { status: response.status, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // ✅ Extract AI message
+    // Extract AI message
     const output =
       data?.candidates?.[0]?.content?.parts?.[0]?.text ||
       "Maaf kijiye, Gemini ne koi jawab nahi diya.";
@@ -122,4 +100,3 @@ async function handler(req: Request) {
 
 console.log("✅ Deno server running at http://localhost:8000");
 serve(handler, { port: 8000 });
-
