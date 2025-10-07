@@ -10,7 +10,7 @@ if (!GEMINI_API_KEY) {
 
 // ✅✅✅ YAHAN BADLAAV KIYA GAYA HAI ✅✅✅
 // Model ko 'gemini-1.5-flash-latest' se badal kar 'gemini-pro' kar diya gaya hai
-const API_URL = `https://generativelanguage.googleapis.com/gemini-2.5-flash-lite:generateContent?key=${GEMINI_API_KEY}`;
+const API_URL = `https://generativelanguage.googleapis.com/gemini-2.5-flash-lite-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`;
 
 // ✅ CORS config
 const corsHeaders = {
