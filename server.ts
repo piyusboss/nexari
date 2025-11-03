@@ -1,22 +1,21 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-// ✅ 1. Hugging Face API Key ko environment se load karein
+// ✅ 1. Hugging Face API Key
 const HF_API_KEY = Deno.env.get("HF_API_KEY");
 
 if (!HF_API_KEY) {
   console.error("❌ WARNING: HF_API_KEY environment variable not set!");
-  console.error("Server will start, but all API calls will fail.");
 }
 
-// ✅✅✅ YAHI HAI ASLI FIX (URL BADAL GAYA HAI) ✅✅✅
-// Puraana (wrong) URL: "https://api-inference.huggingface.co/models/"
-// Aapke error log ke mutabik naya URL:
-const HF_API_BASE_URL = "https://router.huggingface.co/hf-inference/models/";
+// ✅✅✅ FIX 1: API Base URL ko sahi kiya gaya ✅✅✅
+// Puraana (wrong): "https://router.huggingface.co/hf-inference/models/"
+// Sahi (correct): "https://router.huggingface.co/hf-inference/"
+// (Aapke "Not Found" error ka yahi kaaran tha)
+const HF_API_BASE_URL = "https://router.huggingface.co/hf-inference/";
 
 // ✅ 3. Model Mapping
 const MODEL_MAP: { [key: string]: string } = {
-  // Aapke logs ke hisaab se v0.3 update kiya
-  "Nexari G1": "mistralai/Mistral-7B-Instruct-v0.3", 
+  "Nexari G1": "mistralai/Mistral-7B-Instruct-v0.3",
   "Nexari G2": "gpt-oss-20b",
 };
 const DEFAULT_MODEL_ID = MODEL_MAP["Nexari G1"];
@@ -29,12 +28,12 @@ const corsHeaders = {
 };
 
 async function handler(req: Request) {
-  // Handle CORS preflight
+  // Handle CORS
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
-  // Sirf POST requests
+  // Sirf POST
   if (req.method !== "POST") {
     return new Response(JSON.stringify({ error: "Only POST requests allowed" }), {
       status: 405,
@@ -42,7 +41,7 @@ async function handler(req: Request) {
     });
   }
 
-  // API Key ko request ke andar check karein
+  // API Key Check
   if (!HF_API_KEY) {
     console.error("❌ API Key is missing. Request failed.");
     return new Response(
@@ -52,7 +51,7 @@ async function handler(req: Request) {
   }
 
   try {
-    // Client se 'message' aur 'model' ka naam lein
+    // Client se data lein
     const { message, model } = await req.json();
 
     if (!message || typeof message !== "string" || message.trim() === "") {
@@ -62,15 +61,15 @@ async function handler(req: Request) {
       });
     }
 
-    // ✅ 4. Sahi Model ID chunein
+    // Sahi Model ID chunein
     const modelId = MODEL_MAP[model] || DEFAULT_MODEL_ID;
     
-    // ✅✅✅ FIX: Yahan naya URL banega ✅✅✅
+    // Naya, sahi URL banayein
     const apiUrl = HF_API_BASE_URL + modelId;
     
     let prompt = message;
 
-    // ✅ 5. Mistral ke liye prompt ko format karein
+    // Mistral ke liye prompt format karein
     if (modelId.includes("mistralai/Mistral")) {
       prompt = `[INST] ${message} [/INST]`;
     }
@@ -78,7 +77,7 @@ async function handler(req: Request) {
     console.log(`ℹ️ Calling Hugging Face Model: ${modelId}`);
     console.log(`ℹ️ Using Endpoint: ${apiUrl}`); // Debugging ke liye
 
-    // ✅ 6. Hugging Face API ke liye payload taiyaar karein
+    // Payload taiyaar karein
     const payload = {
       inputs: prompt,
       parameters: {
@@ -90,7 +89,7 @@ async function handler(req: Request) {
       },
     };
 
-    // ✅ 7. Hugging Face API ko call karein
+    // Hugging Face API ko call karein
     const response = await fetch(apiUrl, {
       method: "POST",
       headers: {
@@ -100,17 +99,25 @@ async function handler(req: Request) {
       body: JSON.stringify(payload),
     });
 
-    const data = await response.json();
-
+    // ✅✅✅ FIX 2: Error handling ko behtar kiya gaya ✅✅✅
+    // Ab hum .json() call karne se *pehle* check karte hain ki request successful tha ya nahi.
+    // Isse "Not Found" error par server crash nahi hoga.
     if (!response.ok) {
-      console.error("❌ Hugging Face API Error:", data);
+      const errorText = await response.text(); // Error ko text ke roop mein padhein
+      console.error(`❌ Hugging Face API Error (Status: ${response.status}):`, errorText);
       return new Response(
-        JSON.stringify({ error: "Hugging Face API failed", details: data.error || "Unknown error" }),
+        JSON.stringify({ 
+          error: "Hugging Face API failed", 
+          details: errorText || `HTTP status ${response.status}` 
+        }),
         { status: response.status, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // ✅ 8. Response ko extract karein
+    // Ab hum safe hain .json() call karne ke liye
+    const data = await response.json();
+
+    // Response ko extract karein
     const output = data[0]?.generated_text;
 
     if (!output) {
@@ -121,7 +128,7 @@ async function handler(req: Request) {
       );
     }
 
-    // Response ko client ko wapas bhej dein
+    // Client ko response bhej dein
     return new Response(JSON.stringify({ response: output.trim() }), {
       status: 200,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -129,7 +136,8 @@ async function handler(req: Request) {
 
   } catch (error) {
     console.error("💥 Server error:", error);
-    return new Response(JSON.stringify({ error: "Internal server error" }), {
+    // Yeh "SyntaxError" ab nahi aana chahiye, lekin baki errors ke liye zaroori hai
+    return new Response(JSON.stringify({ error: "Internal server error", details: error.message }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
