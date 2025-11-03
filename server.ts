@@ -15,7 +15,7 @@ const HF_API_BASE_URL = "https://api-inference.huggingface.co/models/";
 
 // ✅ 3. Model Mapping
 const MODEL_MAP: { [key: string]: string } = {
-  "Nexari G1": "mistralai/Mistral-7B-Instruct-v0.2",
+  "Nexari G1": "mistralai/Mistral-7B-Instruct-v0.3",
   "Nexari G2": "gpt-oss-20b", 
   // NOTE: 'gpt-oss-20b' shayad valid ID na ho.
   // Agar error aaye, toh 'google/gemma-7b-it' jaisa model use karein.
