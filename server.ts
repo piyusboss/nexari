@@ -1,34 +1,28 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 // ✅ 1. Hugging Face API Key ko environment se load karein
-// (Maine 'HF_API_KEY' naam assume kiya hai, aap ise badal sakte hain)
 const HF_API_KEY = Deno.env.get("HF_API_KEY");
 
+// ✅✅✅ FIX 1: Deno.exit(1) hata diya gaya hai ✅✅✅
+// Deno Deploy par exit allowed nahi hai, isse deployment crash ho raha tha.
 if (!HF_API_KEY) {
-  console.error("❌ Error: HF_API_KEY environment variable not set!");
-  Deno.exit(1);
+  console.error("❌ WARNING: HF_API_KEY environment variable not set!");
+  console.error("Server will start, but all API calls will fail.");
 }
 
 // ✅ 2. Hugging Face Inference API ka base URL
 const HF_API_BASE_URL = "https://api-inference.huggingface.co/models/";
 
 // ✅ 3. Model Mapping
-// Client se 'Nexari G1' aayega, hum use 'mistralai/...' se map karenge
 const MODEL_MAP: { [key: string]: string } = {
-  // Default (fast) model
   "Nexari G1": "mistralai/Mistral-7B-Instruct-v0.2",
-  
-  // Aapka doosra model
   "Nexari G2": "gpt-oss-20b", 
-  // NOTE: 'gpt-oss-20b' ek standard HF ID nahi hai.
-  // Main yeh assume kar raha hoon ki yeh aapke account par available hai.
-  // Agar yeh error de, toh ise 'google/gemma-7b-it' jaise kisi valid ID se badal lein.
+  // NOTE: 'gpt-oss-20b' shayad valid ID na ho.
+  // Agar error aaye, toh 'google/gemma-7b-it' jaisa model use karein.
 };
-
-// Default model ID agar client se koi anjaan naam aaye
 const DEFAULT_MODEL_ID = MODEL_MAP["Nexari G1"];
 
-// ✅ CORS config (koi badlaav nahi)
+// ✅ CORS config
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -36,17 +30,27 @@ const corsHeaders = {
 };
 
 async function handler(req: Request) {
-  // Handle CORS preflight (koi badlaav nahi)
+  // Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
-  // Sirf POST requests (koi badlaav nahi)
+  // Sirf POST requests
   if (req.method !== "POST") {
     return new Response(JSON.stringify({ error: "Only POST requests allowed" }), {
       status: 405,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
+  }
+
+  // ✅✅✅ FIX 2: API Key ko request ke andar check karein ✅✅✅
+  // Agar key set nahi hai, toh request ko fail karein.
+  if (!HF_API_KEY) {
+    console.error("❌ API Key is missing. Request failed.");
+    return new Response(
+      JSON.stringify({ error: "Server configuration error: API Key missing." }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
   }
 
   try {
@@ -67,11 +71,9 @@ async function handler(req: Request) {
     let prompt = message;
 
     // ✅ 5. Mistral ke liye prompt ko format karein
-    // Har model ka apna format hota hai. Mistral [INST] tag use karta hai.
     if (modelId === "mistralai/Mistral-7B-Instruct-v0.2") {
       prompt = `[INST] ${message} [/INST]`;
     }
-    // (Aap 'gpt-oss-20b' ke liye bhi yahan else-if condition laga sakte hain agar use special format chahiye)
 
     console.log(`ℹ️ Calling Hugging Face Model: ${modelId}`);
 
@@ -79,11 +81,11 @@ async function handler(req: Request) {
     const payload = {
       inputs: prompt,
       parameters: {
-        return_full_text: false, // Sirf answer chahiye, prompt wapas nahi
-        max_new_tokens: 512,      // Response length limit
+        return_full_text: false,
+        max_new_tokens: 512,
       },
       options: {
-        wait_for_model: true, // Agar model load ho raha hai toh wait karein
+        wait_for_model: true,
       },
     };
 
@@ -108,7 +110,6 @@ async function handler(req: Request) {
     }
 
     // ✅ 8. Response ko extract karein
-    // HF response ko [0].generated_text mein bhejta hai
     const output = data[0]?.generated_text;
 
     if (!output) {
@@ -134,8 +135,12 @@ async function handler(req: Request) {
   }
 }
 
-console.log("✅ Deno server running at http://localhost:8000");
+console.log("✅ Deno server starting...");
 console.log("Registered Hugging Face models:");
 Object.keys(MODEL_MAP).forEach(key => {
     console.log(`- ${key} -> ${MODEL_MAP[key]}`);
 });
+
+// ✅✅✅ FIX 3: Server ko start karein ✅✅✅
+// Yeh line aapki original file mein nahi thi.
+serve(handler);
