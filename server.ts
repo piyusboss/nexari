@@ -7,7 +7,9 @@ if (!HF_API_KEY) {
   console.error("❌ WARNING: HF_API_KEY environment variable not set!");
 }
 
-// ❌ HF_API_URL yahan se hata diya gaya hai, kyunki yeh dynamic hoga.
+// ✅✅✅ FIX: URL ab hamesha fixed rahega ✅✅✅
+// Naye 410 error ke mutabik, yahi URL istemaal karna hai.
+const HF_API_URL = "https://router.huggingface.co/hf-inference";
 
 // ✅ 3. Model Mapping
 const MODEL_MAP: { [key: string]: string } = {
@@ -67,16 +69,14 @@ async function handler(req: Request) {
       prompt = `[INST] ${message} [/INST]`;
     }
 
-    // ✅✅✅ FIX 1: API URL ko dynamically modelId ke saath banayein ✅✅✅
-    // Standard Inference API ka URL format yeh hota hai:
-    const HF_API_URL = `https://api-inference.huggingface.co/models/${modelId}`;
+    console.log(`ℹ️ Calling Hugging Face Router for model: ${modelId}`);
+    // ✅ Yahi fixed URL ab istemaal hoga
+    console.log(`ℹ️ Using Fixed Endpoint: ${HF_API_URL}`);
 
-    console.log(`ℹ️ Calling Hugging Face API for model: ${modelId}`);
-    console.log(`ℹ️ Using Dynamic Endpoint: ${HF_API_URL}`); // Log message update kar diya
-
-    // ✅✅✅ FIX 2: Payload (JSON) se 'model' key ko hata dein ✅✅✅
+    // ✅✅✅ FIX: Payload (JSON) ke andar model ID bhejein ✅✅✅
+    // (Jaisa aapke original code mein tha)
     const payload = {
-      // model: modelId, <-- YEH LINE HATA DI GAYI HAI
+      model: modelId, // <-- Yahan model ka naam bataya gaya hai
       inputs: prompt,
       parameters: {
         return_full_text: false,
@@ -87,7 +87,7 @@ async function handler(req: Request) {
       },
     };
 
-    // Hugging Face API ko call karein (ab naye dynamic 'HF_API_URL' ke saath)
+    // Hugging Face API ko call karein (ab 'HF_API_URL' use hoga)
     const response = await fetch(HF_API_URL, {
       method: "POST",
       headers: {
