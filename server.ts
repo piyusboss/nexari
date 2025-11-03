@@ -3,22 +3,21 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 // ✅ 1. Hugging Face API Key ko environment se load karein
 const HF_API_KEY = Deno.env.get("HF_API_KEY");
 
-// ✅✅✅ FIX 1: Deno.exit(1) hata diya gaya hai ✅✅✅
-// Deno Deploy par exit allowed nahi hai, isse deployment crash ho raha tha.
 if (!HF_API_KEY) {
   console.error("❌ WARNING: HF_API_KEY environment variable not set!");
   console.error("Server will start, but all API calls will fail.");
 }
 
-// ✅ 2. Hugging Face Inference API ka base URL
-const HF_API_BASE_URL = "https://api-inference.huggingface.co/models/";
+// ✅✅✅ YAHI HAI ASLI FIX (URL BADAL GAYA HAI) ✅✅✅
+// Puraana (wrong) URL: "https://api-inference.huggingface.co/models/"
+// Aapke error log ke mutabik naya URL:
+const HF_API_BASE_URL = "https://router.huggingface.co/hf-inference/models/";
 
 // ✅ 3. Model Mapping
 const MODEL_MAP: { [key: string]: string } = {
-  "Nexari G1": "mistralai/Mistral-7B-Instruct-v0.3",
-  "Nexari G2": "gpt-oss-20b", 
-  // NOTE: 'gpt-oss-20b' shayad valid ID na ho.
-  // Agar error aaye, toh 'google/gemma-7b-it' jaisa model use karein.
+  // Aapke logs ke hisaab se v0.3 update kiya
+  "Nexari G1": "mistralai/Mistral-7B-Instruct-v0.3", 
+  "Nexari G2": "gpt-oss-20b",
 };
 const DEFAULT_MODEL_ID = MODEL_MAP["Nexari G1"];
 
@@ -43,8 +42,7 @@ async function handler(req: Request) {
     });
   }
 
-  // ✅✅✅ FIX 2: API Key ko request ke andar check karein ✅✅✅
-  // Agar key set nahi hai, toh request ko fail karein.
+  // API Key ko request ke andar check karein
   if (!HF_API_KEY) {
     console.error("❌ API Key is missing. Request failed.");
     return new Response(
@@ -66,16 +64,19 @@ async function handler(req: Request) {
 
     // ✅ 4. Sahi Model ID chunein
     const modelId = MODEL_MAP[model] || DEFAULT_MODEL_ID;
+    
+    // ✅✅✅ FIX: Yahan naya URL banega ✅✅✅
     const apiUrl = HF_API_BASE_URL + modelId;
     
     let prompt = message;
 
     // ✅ 5. Mistral ke liye prompt ko format karein
-    if (modelId === "mistralai/Mistral-7B-Instruct-v0.2") {
+    if (modelId.includes("mistralai/Mistral")) {
       prompt = `[INST] ${message} [/INST]`;
     }
 
     console.log(`ℹ️ Calling Hugging Face Model: ${modelId}`);
+    console.log(`ℹ️ Using Endpoint: ${apiUrl}`); // Debugging ke liye
 
     // ✅ 6. Hugging Face API ke liye payload taiyaar karein
     const payload = {
@@ -141,6 +142,5 @@ Object.keys(MODEL_MAP).forEach(key => {
     console.log(`- ${key} -> ${MODEL_MAP[key]}`);
 });
 
-// ✅✅✅ FIX 3: Server ko start karein ✅✅✅
-// Yeh line aapki original file mein nahi thi.
+// Server ko start karein
 serve(handler);
