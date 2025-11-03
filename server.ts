@@ -7,15 +7,16 @@ if (!HF_API_KEY) {
   console.error("❌ WARNING: HF_API_KEY environment variable not set!");
 }
 
-// ✅✅✅ FIX: URL ab hamesha fixed rahega ✅✅✅
-// Naye 410 error ke mutabik, yahi URL istemaal karna hai.
+// ✅✅✅ YAHI URL SAHI HAI (Error 410 ke mutabik) ✅✅✅
 const HF_API_URL = "https://router.huggingface.co/hf-inference";
 
-// ✅ 3. Model Mapping
+// ✅ 3. Model Mapping (FIX YAHAN HAI)
+// Humne models ko un models se badal diya hai jo free tier par available hote hain.
 const MODEL_MAP: { [key: string]: string } = {
-  "Nexari G1": "mistralai/Mistral-7B-Instruct-v0.3",
-  "Nexari G2": "gpt-oss-20b",
+  "Nexari G1": "mistralai/Mistral-7B-Instruct-v0.1", // v0.3 free tier par nahi tha
+  "Nexari G2": "google/gemma-7b-it", // gpt-oss-20b free tier par nahi tha
 };
+// Default model ko bhi update kar diya
 const DEFAULT_MODEL_ID = MODEL_MAP["Nexari G1"];
 
 // ✅ CORS config
@@ -64,19 +65,20 @@ async function handler(req: Request) {
     
     let prompt = message;
 
-    // Mistral ke liye prompt format karein
+    // Mistral ya Gemma ke liye prompt format karein
     if (modelId.includes("mistralai/Mistral")) {
       prompt = `[INST] ${message} [/INST]`;
+    } else if (modelId.includes("google/gemma")) {
+      // Gemma ke liye format
+      prompt = `<start_of_turn>user\n${message}<end_of_turn>\n<start_of_turn>model\n`;
     }
 
     console.log(`ℹ️ Calling Hugging Face Router for model: ${modelId}`);
-    // ✅ Yahi fixed URL ab istemaal hoga
     console.log(`ℹ️ Using Fixed Endpoint: ${HF_API_URL}`);
 
-    // ✅✅✅ FIX: Payload (JSON) ke andar model ID bhejein ✅✅✅
-    // (Jaisa aapke original code mein tha)
+    // ✅✅✅ YAHI PAYLOAD SAHI HAI ✅✅✅
     const payload = {
-      model: modelId, // <-- Yahan model ka naam bataya gaya hai
+      model: modelId, // <-- Model ka naam JSON ke andar
       inputs: prompt,
       parameters: {
         return_full_text: false,
@@ -87,7 +89,7 @@ async function handler(req: Request) {
       },
     };
 
-    // Hugging Face API ko call karein (ab 'HF_API_URL' use hoga)
+    // Hugging Face API ko call karein
     const response = await fetch(HF_API_URL, {
       method: "POST",
       headers: {
@@ -97,9 +99,10 @@ async function handler(req: Request) {
       body: JSON.stringify(payload),
     });
 
-    // Error handling (ismein koi badlaav nahi)
+    // Error handling
     if (!response.ok) {
       const errorText = await response.text();
+      // Yahan 404 error ka matlab hoga ki naya model bhi load nahi hua
       console.error(`❌ Hugging Face API Error (Status: ${response.status}):`, errorText);
       return new Response(
         JSON.stringify({ 
@@ -113,9 +116,18 @@ async function handler(req: Request) {
     const data = await response.json();
 
     // Response ko extract karein
-    const output = data[0]?.generated_text;
+    let output = data[0]?.generated_text;
 
-    if (!output) {
+    // Gemma kabhi kabhi prompt wapas bhej deta hai, use saaf karein
+    if (output && modelId.includes("google/gemma")) {
+        if (output.startsWith(prompt)) {
+            output = output.substring(prompt.length);
+        }
+        // Gemma kabhi kabhi "<end_of_turn>" bhejta hai
+        output = output.replace(/<end_of_turn>/g, "").trim();
+    }
+
+    if (!output || output.trim() === "") {
       console.error("❌ Invalid HF Response Structure:", data);
       return new Response(
         JSON.stringify({ response: "Maaf kijiye, model se empty response mila." }),
@@ -139,7 +151,7 @@ async function handler(req: Request) {
 }
 
 console.log("✅ Deno server starting...");
-console.log("Registered Hugging Face models:");
+console.log("Registered Hugging Face models (Updated):");
 Object.keys(MODEL_MAP).forEach(key => {
     console.log(`- ${key} -> ${MODEL_MAP[key]}`);
 });
