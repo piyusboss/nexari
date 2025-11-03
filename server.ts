@@ -7,9 +7,7 @@ if (!HF_API_KEY) {
   console.error("❌ WARNING: HF_API_KEY environment variable not set!");
 }
 
-// ✅✅✅ FIX 1: URL ab hamesha fixed rahega ✅✅✅
-// Model ka naam ab URL mein nahi jayega.
-const HF_API_URL = "https://router.huggingface.co/hf-inference";
+// ❌ HF_API_URL yahan se hata diya gaya hai, kyunki yeh dynamic hoga.
 
 // ✅ 3. Model Mapping
 const MODEL_MAP: { [key: string]: string } = {
@@ -69,12 +67,16 @@ async function handler(req: Request) {
       prompt = `[INST] ${message} [/INST]`;
     }
 
-    console.log(`ℹ️ Calling Hugging Face Router for model: ${modelId}`);
-    console.log(`ℹ️ Using Fixed Endpoint: ${HF_API_URL}`);
+    // ✅✅✅ FIX 1: API URL ko dynamically modelId ke saath banayein ✅✅✅
+    // Standard Inference API ka URL format yeh hota hai:
+    const HF_API_URL = `https://api-inference.huggingface.co/models/${modelId}`;
 
-    // ✅✅✅ FIX 2: Payload (JSON) ke andar model ID bhejein ✅✅✅
+    console.log(`ℹ️ Calling Hugging Face API for model: ${modelId}`);
+    console.log(`ℹ️ Using Dynamic Endpoint: ${HF_API_URL}`); // Log message update kar diya
+
+    // ✅✅✅ FIX 2: Payload (JSON) se 'model' key ko hata dein ✅✅✅
     const payload = {
-      model: modelId, // <-- Yahan model ka naam bataya gaya hai
+      // model: modelId, <-- YEH LINE HATA DI GAYI HAI
       inputs: prompt,
       parameters: {
         return_full_text: false,
@@ -85,7 +87,7 @@ async function handler(req: Request) {
       },
     };
 
-    // Hugging Face API ko call karein (ab 'apiUrl' ki jagah 'HF_API_URL' use hoga)
+    // Hugging Face API ko call karein (ab naye dynamic 'HF_API_URL' ke saath)
     const response = await fetch(HF_API_URL, {
       method: "POST",
       headers: {
