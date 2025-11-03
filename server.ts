@@ -9,8 +9,27 @@ if (!GEMINI_API_KEY) {
 }
 
 // ✅✅✅ YAHAN BADLAAV KIYA GAYA HAI ✅✅✅
-// Model ko 'gemini-1.5-flash-latest' se badal kar 'gemini-pro' kar diya gaya hai
-const API_URL = `https://generativelanguage.googleapis.com/gemini-2.5-flash-lite-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`;
+// Hum client se (model.js se) 'Nexari G1' ya 'Nexari G2' jaise naam expect kar rahe hain.
+// Hum un naamon ko asli API URLs se map karenge.
+
+const MODEL_MAP: { [key: string]: string } = {
+  // "Nexari G1" (Display Name) -> "Full API URL"
+  // Yeh aapka original model hai
+  "Nexari G1": `https://generativelanguage.googleapis.com/gemini-2.5-flash-lite-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`,
+  
+  // "Nexari G2" (Aapka doosra model) -> "Full API URL"
+  // Yeh 'gemini-pro' hai (jaisa aapne comment mein likha tha)
+  // Note: 'gemini-pro' v1beta endpoint use karta hai
+  "Nexari G2": `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${GEMINI_API_KEY}`,
+  
+  // Aap yahan aur models add kar sakte hain, jaise:
+  // "Nexari Pro": `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key=${GEMINI_API_KEY}`
+};
+
+// Agar koi anjaan model aaye, toh default "Nexari G1" use karein
+const DEFAULT_API_URL = MODEL_MAP["Nexari G1"];
+// ✅✅✅ END OF CHANGE ✅✅✅
+
 
 // ✅ CORS config
 const corsHeaders = {
@@ -33,7 +52,11 @@ async function handler(req: Request) {
   }
 
   try {
-    const { message } = await req.json();
+    // ✅✅✅ YAHAN BADLAAV KIYA GAYA HAI ✅✅✅
+    // Ab 'message' ke saath 'model' ko bhi request se nikaal rahe hain
+    const { message, model } = await req.json(); 
+    // ✅✅✅ END OF CHANGE ✅✅✅
+
     if (!message || typeof message !== "string" || message.trim() === "") {
       return new Response(JSON.stringify({ error: "Message required" }), {
         status: 400,
@@ -51,8 +74,16 @@ async function handler(req: Request) {
       ],
     };
 
+    // ✅✅✅ YAHAN BADLAAV KIYA GAYA HAI ✅✅✅
+    // Client dwara bheje gaye 'model' naam ke aadhaar par sahi API URL chunein
+    // Agar 'model' ka naam map mein nahi milta, toh default URL use karein
+    const API_URL = MODEL_MAP[model] || DEFAULT_API_URL;
+    
+    console.log(`ℹ️ Model requested: "${model}", Using API endpoint for: "${Object.keys(MODEL_MAP).find(key => MODEL_MAP[key] === API_URL) || 'Default'}"`);
+    // ✅✅✅ END OF CHANGE ✅✅✅
+
     // Call Gemini API
-    const response = await fetch(API_URL, {
+    const response = await fetch(API_URL, { // <-- API_URL ab dynamic hai
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -99,4 +130,8 @@ async function handler(req: Request) {
 }
 
 console.log("✅ Deno server running at http://localhost:8000");
+console.log("Registered models:");
+Object.keys(MODEL_MAP).forEach(key => {
+    console.log(`- ${key} -> ${MODEL_MAP[key].split('/')[3].split(':')[0]}`);
+});
 serve(handler, { port: 8000 });
