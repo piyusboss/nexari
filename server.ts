@@ -7,16 +7,18 @@ if (!HF_API_KEY) {
   console.error("❌ WARNING: HF_API_KEY environment variable not set!");
 }
 
-// ✅✅✅ YAHI URL SAHI HAI (Error 410 ke mutabik) ✅✅✅
+// ✅ Yahi URL sahi hai
 const HF_API_URL = "https://router.huggingface.co/hf-inference";
 
-// ✅ 3. Model Mapping (FIX YAHAN HAI)
-// Humne models ko un models se badal diya hai jo free tier par available hote hain.
+// ✅ 3. Model Mapping (✅✅✅ DEBUGGING FIX YAHAN HAI ✅✅✅)
 const MODEL_MAP: { [key: string]: string } = {
-  "Nexari G1": "meta-llama/Meta-Llama-3-8B-Instruct", // v0.3 free tier par nahi tha
-  "Nexari G2": "google/gemma-7b-it", // gpt-oss-20b free tier par nahi tha
+  // "Nexari G1" ko ab hum GPT-2 se test kar rahe hain
+  "Nexari G1": "gpt2", 
+  
+  // Isko waise hi chhod dein
+  "Nexari G2": "google/gemma-7b-it", 
 };
-// Default model ko bhi update kar diya
+// Default model ab 'gpt2' hai
 const DEFAULT_MODEL_ID = MODEL_MAP["Nexari G1"];
 
 // ✅ CORS config
@@ -27,12 +29,13 @@ const corsHeaders = {
 };
 
 async function handler(req: Request) {
-  // Handle CORS
+  // ... (Baaki poora code 100% same rahega) ...
+  // ... (Handle CORS) ...
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
-  // Sirf POST
+  // ... (Handle POST) ...
   if (req.method !== "POST") {
     return new Response(JSON.stringify({ error: "Only POST requests allowed" }), {
       status: 405,
@@ -40,7 +43,7 @@ async function handler(req: Request) {
     });
   }
 
-  // API Key Check
+  // ... (Handle API Key) ...
   if (!HF_API_KEY) {
     console.error("❌ API Key is missing. Request failed.");
     return new Response(
@@ -50,7 +53,7 @@ async function handler(req: Request) {
   }
 
   try {
-    // Client se data lein
+    // ... (Client se data lein) ...
     const { message, model } = await req.json();
 
     if (!message || typeof message !== "string" || message.trim() === "") {
@@ -65,24 +68,24 @@ async function handler(req: Request) {
     
     let prompt = message;
 
-    // Mistral ya Gemma ke liye prompt format karein
+    // Prompt formatting (gpt2 ke liye yeh skip ho jayega, jo sahi hai)
     if (modelId.includes("mistralai/Mistral")) {
       prompt = `[INST] ${message} [/INST]`;
     } else if (modelId.includes("google/gemma")) {
-      // Gemma ke liye format
       prompt = `<start_of_turn>user\n${message}<end_of_turn>\n<start_of_turn>model\n`;
     }
+    // Agar modelId 'gpt2' hai, toh 'prompt' sirf 'message' rahega (Perfect!)
 
-    console.log(`ℹ️ Calling Hugging Face Router for model: ${modelId}`);
-    console.log(`ℹ️ Using Fixed Endpoint: ${HF_API_URL}`);
+    console.log(`ℹ️ DEBUG: Calling HF Router for model: ${modelId}`);
+    console.log(`ℹ️ DEBUG: Using Fixed Endpoint: ${HF_API_URL}`);
 
-    // ✅✅✅ YAHI PAYLOAD SAHI HAI ✅✅✅
+    // Payload (bilkul sahi hai)
     const payload = {
-      model: modelId, // <-- Model ka naam JSON ke andar
+      model: modelId, 
       inputs: prompt,
       parameters: {
         return_full_text: false,
-        max_new_tokens: 512,
+        max_new_tokens: 50, // Test ke liye tokens kam kar diye
       },
       options: {
         wait_for_model: true,
@@ -102,7 +105,6 @@ async function handler(req: Request) {
     // Error handling
     if (!response.ok) {
       const errorText = await response.text();
-      // Yahan 404 error ka matlab hoga ki naya model bhi load nahi hua
       console.error(`❌ Hugging Face API Error (Status: ${response.status}):`, errorText);
       return new Response(
         JSON.stringify({ 
@@ -118,12 +120,10 @@ async function handler(req: Request) {
     // Response ko extract karein
     let output = data[0]?.generated_text;
 
-    // Gemma kabhi kabhi prompt wapas bhej deta hai, use saaf karein
     if (output && modelId.includes("google/gemma")) {
         if (output.startsWith(prompt)) {
             output = output.substring(prompt.length);
         }
-        // Gemma kabhi kabhi "<end_of_turn>" bhejta hai
         output = output.replace(/<end_of_turn>/g, "").trim();
     }
 
@@ -151,7 +151,7 @@ async function handler(req: Request) {
 }
 
 console.log("✅ Deno server starting...");
-console.log("Registered Hugging Face models (Updated):");
+console.log("Registered Hugging Face models (DEBUG MODE):");
 Object.keys(MODEL_MAP).forEach(key => {
     console.log(`- ${key} -> ${MODEL_MAP[key]}`);
 });
