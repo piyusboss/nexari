@@ -7,11 +7,9 @@ if (!HF_API_KEY) {
   console.error("❌ WARNING: HF_API_KEY environment variable not set!");
 }
 
-// ✅✅✅ FIX 1: API Base URL ko sahi kiya gaya ✅✅✅
-// Puraana (wrong): "https://router.huggingface.co/hf-inference/models/"
-// Sahi (correct): "https://router.huggingface.co/hf-inference/"
-// (Aapke "Not Found" error ka yahi kaaran tha)
-const HF_API_BASE_URL = "https://router.huggingface.co/hf-inference/";
+// ✅✅✅ FIX 1: URL ab hamesha fixed rahega ✅✅✅
+// Model ka naam ab URL mein nahi jayega.
+const HF_API_URL = "https://router.huggingface.co/hf-inference";
 
 // ✅ 3. Model Mapping
 const MODEL_MAP: { [key: string]: string } = {
@@ -64,9 +62,6 @@ async function handler(req: Request) {
     // Sahi Model ID chunein
     const modelId = MODEL_MAP[model] || DEFAULT_MODEL_ID;
     
-    // Naya, sahi URL banayein
-    const apiUrl = HF_API_BASE_URL + modelId;
-    
     let prompt = message;
 
     // Mistral ke liye prompt format karein
@@ -74,11 +69,12 @@ async function handler(req: Request) {
       prompt = `[INST] ${message} [/INST]`;
     }
 
-    console.log(`ℹ️ Calling Hugging Face Model: ${modelId}`);
-    console.log(`ℹ️ Using Endpoint: ${apiUrl}`); // Debugging ke liye
+    console.log(`ℹ️ Calling Hugging Face Router for model: ${modelId}`);
+    console.log(`ℹ️ Using Fixed Endpoint: ${HF_API_URL}`);
 
-    // Payload taiyaar karein
+    // ✅✅✅ FIX 2: Payload (JSON) ke andar model ID bhejein ✅✅✅
     const payload = {
+      model: modelId, // <-- Yahan model ka naam bataya gaya hai
       inputs: prompt,
       parameters: {
         return_full_text: false,
@@ -89,8 +85,8 @@ async function handler(req: Request) {
       },
     };
 
-    // Hugging Face API ko call karein
-    const response = await fetch(apiUrl, {
+    // Hugging Face API ko call karein (ab 'apiUrl' ki jagah 'HF_API_URL' use hoga)
+    const response = await fetch(HF_API_URL, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${HF_API_KEY}`,
@@ -99,11 +95,9 @@ async function handler(req: Request) {
       body: JSON.stringify(payload),
     });
 
-    // ✅✅✅ FIX 2: Error handling ko behtar kiya gaya ✅✅✅
-    // Ab hum .json() call karne se *pehle* check karte hain ki request successful tha ya nahi.
-    // Isse "Not Found" error par server crash nahi hoga.
+    // Error handling (ismein koi badlaav nahi)
     if (!response.ok) {
-      const errorText = await response.text(); // Error ko text ke roop mein padhein
+      const errorText = await response.text();
       console.error(`❌ Hugging Face API Error (Status: ${response.status}):`, errorText);
       return new Response(
         JSON.stringify({ 
@@ -114,7 +108,6 @@ async function handler(req: Request) {
       );
     }
 
-    // Ab hum safe hain .json() call karne ke liye
     const data = await response.json();
 
     // Response ko extract karein
@@ -136,7 +129,6 @@ async function handler(req: Request) {
 
   } catch (error) {
     console.error("💥 Server error:", error);
-    // Yeh "SyntaxError" ab nahi aana chahiye, lekin baki errors ke liye zaroori hai
     return new Response(JSON.stringify({ error: "Internal server error", details: error.message }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
