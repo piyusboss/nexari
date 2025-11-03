@@ -13,7 +13,7 @@ const HF_API_URL = "https://router.huggingface.co/hf-inference";
 // ✅ 3. Model Mapping (FIX YAHAN HAI)
 // Humne models ko un models se badal diya hai jo free tier par available hote hain.
 const MODEL_MAP: { [key: string]: string } = {
-  "Nexari G1": "mistralai/Mistral-7B-Instruct-v0.1", // v0.3 free tier par nahi tha
+  "Nexari G1": "meta-llama/Meta-Llama-3-8B-Instruct", // v0.3 free tier par nahi tha
   "Nexari G2": "google/gemma-7b-it", // gpt-oss-20b free tier par nahi tha
 };
 // Default model ko bhi update kar diya
