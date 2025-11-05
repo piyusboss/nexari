@@ -35,21 +35,22 @@ function extractTextFromHf(data: any): string | null {
   return null;
 }
 
-// 'modelRepo' argument ab sirf logging ke liye istemaal hoga, URL ke liye nahi.
+// 'modelRepo' argument ab URL ke liye phir se zaroori hai
 async function callHf(modelRepo: string, payload: unknown) {
   
-  // ================== GEMINI MODIFY START (FIX 1) ==================
-  // Naya 'hf-inference' router ek static URL istemaal karta hai.
-  // Model ka naam ab URL ka hissa nahi hai.
+  // ================== GEMINI MODIFY START (Final Fix) ==================
+  // Root Cause: 'router.huggingface.co' URL sirf 'gpt2' jaise paid models ke liye tha.
+  // 'distilgpt2' jaise free models ke liye abhi bhi yahi purana URL sahi hai.
   
   // === FIX ===
-  const url = `https://router.huggingface.co/hf-inference`;
+  const url = `https://api-inference.huggingface.co/models/${encodeURIComponent(modelRepo)}`;
   
   // ==================  GEMINI MODIFY END  ==================
 
   const controller = new AbortController();
   const timeoutMs = 60_000;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // Yeh 'timeoutMs' wala fix sahi tha aur rahega
+  const timer = setTimeout(() => controller.abort(), timeoutMs); 
 
   try {
     const res = await fetch(url, {
@@ -59,7 +60,7 @@ async function callHf(modelRepo: string, payload: unknown) {
         "Content-Type": "application/json",
         "Accept": "application/json"
       },
-      // 'payload' mein ab 'model' aur 'inputs' dono hain (handler se aa raha hai)
+      // 'payload' mein ab sirf {inputs: "..."} hoga
       body: JSON.stringify(payload),
       signal: controller.signal
     });
@@ -68,11 +69,8 @@ async function callHf(modelRepo: string, payload: unknown) {
     let data: any;
     try { data = JSON.parse(text); } catch { data = text; }
     
-    // Yahan ek 'ok' check add karein taaki hum Deno logs mein behtar error dekh sakein
-    // agar Hugging Face 200 OK ke alawa kuch bhejta hai
     if (!res.ok) {
        console.error(`❌ Hugging Face API Error (Model: ${modelRepo}): Status ${res.status}`, text);
-       // 'data' mein error details ho sakti hain, use aage pass karein
        return { ok: false, status: res.status, data };
     }
     
@@ -95,7 +93,6 @@ async function handler(req: Request): Promise<Response> {
   let body: any = {};
   try { body = await req.json(); } catch (e) { /* ignore */ }
 
-  // Accept multiple keys from client: message / input / prompt
   const input = body.input ?? body.inputs ?? body.prompt ?? body.message ?? "";
   if (!input || (typeof input === 'string' && input.trim() === "")) {
     return new Response(JSON.stringify({ error: "Missing 'input'/'message'/'prompt' in request body" }), {
@@ -104,41 +101,36 @@ async function handler(req: Request): Promise<Response> {
     });
   }
 
-  // script.js se 'distilgpt2' (ya jo bhi selected hai) aa raha hai
+  // script.js se 'distilgpt2' aa raha hai, jo sahi hai
   const model = (body.model ?? "distilgpt2").toString();
 
-  // ================== GEMINI MODIFY START (FIX 2) ==================
-  // Naye router ko model ka naam 'payload' (body) mein chahiye.
-  
+  // ================== GEMINI MODIFY START (Final Fix) ==================
+  // Purana API 'model' ko body mein expect nahi karta hai.
   // === FIX ===
   const payload: any = { 
-    model: model, // Model ka naam yahan add karein
     inputs: input 
   };
   // ==================  GEMINI MODIFY END  ==================
   
   if (body.parameters && typeof body.parameters === "object") payload.parameters = body.parameters;
 
-  // Ab callHf() naye static URL ko call karega aur payload mein model bhejega
+  // Ab callHf() 'distilgpt2' ko 'modelRepo' ke roop mein
+  // aur {inputs: "..."} ko 'payload' ke roop mein bhejega.
   const hf = await callHf(model, payload);
 
   if (!hf.ok) {
-    // 'hf.data' se error nikalne ki koshish karein (JSON ya text)
     let message = hf.data?.error ?? hf.data?.message ?? (typeof hf.data === 'string' ? hf.data : JSON.stringify(hf.data));
     
     if (hf.status === 404) {
       message = `Hugging Face returned 404 Not Found — model not found or inference disabled. Check model id. (Model used: ${model})`;
-    } else if (hf.status === 400) {
-        message = `Hugging Face returned 400 Bad Request. Check payload. (Model: ${model}, Error: ${message})`;
     } else if (hf.status === 503) {
          message = `Hugging Face returned 503 Service Unavailable. Model is loading. Try again in a few seconds. (Model: ${model})`;
     }
     
-    // Error ko Deno logs mein print karein taaki aap isey dashboard par dekh sakein
     console.error(`❌ Error response from HF (Model '${model}'): ${message}`);
 
     return new Response(JSON.stringify({ error: message, status: hf.status, details: hf.data }), {
-      status: 502, // Bad Gateway (hum proxy hain)
+      status: 502, 
       headers: { ...corsHeaders, "Content-Type": "application/json" }
     });
   }
@@ -152,7 +144,6 @@ async function handler(req: Request): Promise<Response> {
     });
   }
 
-  // If not extractable, forward raw hf.data as 'response' (frontend can handle object)
   return new Response(JSON.stringify({ response: hf.data }), {
     status: 200,
     headers: { ...corsHeaders, "Content-Type": "application/json" }
