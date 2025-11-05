@@ -2,7 +2,7 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 // ✅✅✅ DEBUGGING FIX: API Key ko yahan hardcode karein ✅✅✅
 // Apni key ko "hf_..." waale quotes ke andar paste karein
-const HF_API_KEY = "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"; 
+const HF_API_KEY = "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"; 
 
 // Hum check kar rahe hain ki key load hui ya nahi
 if (!HF_API_KEY || HF_API_KEY === "YOUR_HF_API_KEY_HERE") {
