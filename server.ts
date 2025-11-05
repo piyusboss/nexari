@@ -37,14 +37,18 @@ function extractTextFromHf(data: any): string | null {
 
 async function callHf(modelRepo: string, payload: unknown) {
   // ================== GEMINI MODIFY START ==================
-  // Purana URL: https://api-inference.huggingface.co/models/...
-  // Naya URL error log ke hisab se update kiya gaya
-  const url = `https://router.huggingface.co/hf-inference/models/${encodeURIComponent(modelRepo)}`;
+  // YAHI FIX HAI:
+  // Hum 'router.huggingface.co' (Paid Endpoints) ki jagah
+  // 'api-inference.huggingface.co' (Free/Public API) ka istemaal kar rahe hain.
+  
+  // === FIX ===
+  const url = `https://api-inference.huggingface.co/models/${encodeURIComponent(modelRepo)}`;
+  
   // ==================  GEMINI MODIFY END  ==================
 
   const controller = new AbortController();
   const timeoutMs = 60_000;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => controller.abort(), timer);
 
   try {
     const res = await fetch(url, {
@@ -88,11 +92,13 @@ async function handler(req: Request): Promise<Response> {
     });
   }
 
+  // script.js se 'gpt2' aa raha hai
   const model = (body.model ?? "gpt2").toString();
 
   const payload: any = { inputs: input };
   if (body.parameters && typeof body.parameters === "object") payload.parameters = body.parameters;
 
+  // Ab callHf() 'gpt2' model ko sahi public URL par call karega
   const hf = await callHf(model, payload);
 
   if (!hf.ok) {
@@ -126,5 +132,5 @@ async function handler(req: Request): Promise<Response> {
   });
 }
 
-console.log("✅ Deno server starting — proxy to Hugging Face Inference API");
+console.log("✅ Deno server starting — proxy to Hugging Face API");
 serve(handler);
