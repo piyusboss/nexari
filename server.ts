@@ -1,4 +1,9 @@
-// server.ts — Deno proxy to Hugging Face Inference API (fixed)
+// server.ts — Deno proxy using Hugging Face Router (v1 chat/completions)
+// Works with HF Router: https://router.huggingface.co/v1/chat/completions
+// - Sends OpenAI-compatible chat requests to the Router
+// - Wraps plain "input" into messages automatically
+// - Robust timeout, error normalization, better logs
+
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 const HF_API_KEY = Deno.env.get("HF_API_KEY") ?? "";
@@ -7,34 +12,42 @@ if (!HF_API_KEY) {
   Deno.exit(1);
 }
 
+const ROUTER_BASE = "https://router.huggingface.co/v1";
+const CHAT_PATH = "/chat/completions"; // final URL -> `${ROUTER_BASE}${CHAT_PATH}`
+
 const corsHeaders = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "POST, OPTIONS, GET",
   "access-control-allow-headers": "Content-Type, Authorization",
 };
 
-function extractTextFromHf(data: any): string | null {
+function extractTextFromHfLike(data: any): string | null {
+  // OpenAI-like: { choices: [{ message: { content: "..." } }] }
+  if (data && Array.isArray(data.choices) && data.choices.length > 0) {
+    const ch = data.choices[0];
+    if (ch?.message?.content && typeof ch.message.content === "string") return ch.message.content;
+    if (typeof ch?.text === "string") return ch.text;
+  }
+  // HF legacy shapes
   if (Array.isArray(data) && data.length > 0) {
     const first = data[0];
     if (typeof first === "string") return first;
-    if (typeof first.generated_text === "string") return first.generated_text;
-    if (typeof first.text === "string") return first.text;
-    if (first.output && Array.isArray(first.output) && first.output[0]?.generated_text) return first.output[0].generated_text;
+    if (first?.generated_text && typeof first.generated_text === "string") return first.generated_text;
+    if (first?.text && typeof first.text === "string") return first.text;
   }
   if (data && typeof data === "object") {
     if (typeof data.generated_text === "string") return data.generated_text;
     if (typeof data.text === "string") return data.text;
-    if (Array.isArray(data.choices) && data.choices[0]?.text) return data.choices[0].text;
+    if (Array.isArray(data.output) && data.output[0]?.generated_text) return data.output[0].generated_text;
+    // Some router responses include 'output_text'
+    if (typeof data.output_text === "string") return data.output_text;
   }
   if (typeof data === "string") return data;
   return null;
 }
 
-async function callHf(modelRepo: string, payload: unknown, timeoutMs = 60_000) {
-  // Use encode per path-segment so slashes remain separators
-  const encodedModel = modelRepo.split("/").map(encodeURIComponent).join("/");
-  const url = `https://api-inference.huggingface.co/models/${encodedModel}`;
-
+async function callRouter(payload: unknown, timeoutMs = 60_000) {
+  const url = `${ROUTER_BASE}${CHAT_PATH}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -44,39 +57,21 @@ async function callHf(modelRepo: string, payload: unknown, timeoutMs = 60_000) {
       headers: {
         "Authorization": `Bearer ${HF_API_KEY}`,
         "Content-Type": "application/json",
-        "Accept": "application/json"
+        "Accept": "application/json",
       },
       body: JSON.stringify(payload),
-      signal: controller.signal
+      signal: controller.signal,
     });
     clearTimeout(timer);
 
     const text = await res.text();
     let data: any;
     try { data = JSON.parse(text); } catch { data = text; }
-
-    return { ok: res.ok, status: res.status, data, statusText: res.statusText };
+    return { ok: res.ok, status: res.status, statusText: res.statusText, data };
   } catch (err: any) {
     clearTimeout(timer);
-    // If aborted, err.name is "AbortError"
     return { ok: false, status: 500, data: { error: err?.message ?? String(err) } };
   }
-}
-
-async function tryWithFallback(models: string[], payload: unknown) {
-  // Try models sequentially when 404 happens
-  for (const m of models) {
-    const res = await callHf(m, payload);
-    if (res.ok) return { model: m, res };
-    // if 404 -> try next model
-    if (res.status === 404) {
-      console.warn(`Model ${m} returned 404, trying next fallback if any.`);
-      continue;
-    }
-    // for rate limits or server errors, return immediately to the client
-    return { model: m, res };
-  }
-  return null;
 }
 
 async function handler(req: Request): Promise<Response> {
@@ -88,76 +83,80 @@ async function handler(req: Request): Promise<Response> {
   }
 
   let body: any = {};
-  try { body = await req.json(); } catch (e) { /* ignore, will validate below */ }
+  try { body = await req.json(); } catch (e) { /* ignore - we'll validate below */ }
 
   const input = body.input ?? body.inputs ?? body.prompt ?? body.message ?? "";
-  if (!input || (typeof input === 'string' && input.trim() === "")) {
-    return new Response(JSON.stringify({ error: "Missing 'input'/'message'/'prompt' in request body" }), {
+  const messagesFromClient = body.messages; // optional OpenAI-style messages array
+  const model = (body.model ?? null)?.toString?.() ?? null;
+  const clientParameters = (body.parameters && typeof body.parameters === "object") ? body.parameters : {};
+
+  if (!input && !Array.isArray(messagesFromClient)) {
+    return new Response(JSON.stringify({ error: "Missing 'input'/'message'/'prompt' or 'messages' in request body" }), {
+      status: 400,
+      headers: { ...corsHeaders, "Content-Type": "application/json" }
+    });
+  }
+  if (!model) {
+    return new Response(JSON.stringify({ error: "Missing 'model' in request body. Provide model id like 'meta-llama/Meta-Llama-3-8B-Instruct' or 'deepseek-ai/DeepSeek-R1:fastest'." }), {
       status: 400,
       headers: { ...corsHeaders, "Content-Type": "application/json" }
     });
   }
 
-  // Don't silently default to "gpt2" (may be unavailable). Prefer explicit model or a safe fallback list.
-  const clientModel = body.model ?? null;
+  // Build OpenAI-compatible chat payload for HF Router v1
+  // If client supplied `messages`, use them; otherwise wrap `input` as a single user message.
+  const messages = Array.isArray(messagesFromClient)
+    ? messagesFromClient
+    : [{ role: "user", content: String(input) }];
 
-  // Fallback list — adjust to models you verify are available for your account.
-  const fallbackModels = [
-    // put verified models here (example)
-    "facebook/bart-large-mnli",
-    "distilbert-base-uncased"
-    // don't include models you know are removed from free inference
-  ];
+  // router expects model + messages at top-level; other 'parameters' (max_tokens, temperature, stream) also top-level
+  const routerPayload: any = {
+    model,
+    messages,
+    stream: false,
+    ...clientParameters
+  };
 
-  const payload: any = { inputs: input };
-  if (body.parameters && typeof body.parameters === "object") payload.parameters = body.parameters;
+  // Call router
+  const hf = await callRouter(routerPayload);
 
-  let result: any;
-  if (clientModel) {
-    // try requested model first
-    result = await callHf(clientModel.toString(), payload);
-    if (!result.ok && result.status === 404) {
-      // try fallback list if requested model not found
-      const tried = await tryWithFallback(fallbackModels, payload);
-      if (tried) {
-        result = tried.res;
-        console.log(`Fell back to model ${tried.model}`);
-      }
+  // Handle 410 specifically (older api-inference deprecation message passed through)
+  if (!hf.ok) {
+    // If HF returned 410 with suggestion to use router, include helpful guidance
+    const lowMsg = typeof hf.data === "object" ? JSON.stringify(hf.data) : String(hf.data);
+    if (hf.status === 410 || (lowMsg && lowMsg.includes("api-inference.huggingface.co is no longer"))) {
+      console.error("❌ Detected deprecated api-inference usage from upstream. Using router.huggingface.co is required.");
+      return new Response(JSON.stringify({
+        error: "Upstream indicates 'api-inference.huggingface.co' is deprecated. This proxy uses 'router.huggingface.co/v1/chat/completions'.",
+        upstream: hf.data,
+        status: hf.status
+      }), { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
-  } else {
-    // no client model provided — try fallback list
-    const tried = await tryWithFallback(fallbackModels, payload);
-    if (!tried) {
-      return new Response(JSON.stringify({ error: "No models available from fallback list" }), { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-    }
-    result = tried.res;
-  }
 
-  if (!result.ok) {
-    let message = result.data?.error ?? result.data?.message ?? JSON.stringify(result.data);
-    if (result.status === 404) {
-      message = `Hugging Face returned 404 Not Found — model not found or inference disabled. Check model id.`;
-    }
-    console.error(`❌ Error calling HF: ${message} (status ${result.status})`);
-    return new Response(JSON.stringify({ error: message, status: result.status, details: result.data }), {
+    // Pass through other HF/router errors with context
+    let message = hf.data?.error ?? hf.data?.message ?? hf.statusText ?? JSON.stringify(hf.data);
+    console.error(`❌ Error calling HF Router (status ${hf.status}): ${message}`);
+    return new Response(JSON.stringify({ error: message, status: hf.status, details: hf.data }), {
       status: 502,
       headers: { ...corsHeaders, "Content-Type": "application/json" }
     });
   }
 
-  const normalized = extractTextFromHf(result.data);
+  // normalize output
+  const normalized = extractTextFromHfLike(hf.data);
   if (normalized !== null) {
-    return new Response(JSON.stringify({ response: normalized, raw: result.data }), {
+    return new Response(JSON.stringify({ response: normalized, raw: hf.data }), {
       status: 200,
       headers: { ...corsHeaders, "Content-Type": "application/json" }
     });
   }
 
-  return new Response(JSON.stringify({ response: result.data }), {
+  // fallback: return raw router response
+  return new Response(JSON.stringify({ response: hf.data }), {
     status: 200,
     headers: { ...corsHeaders, "Content-Type": "application/json" }
   });
 }
 
-console.log("✅ Deno server starting — proxy to Hugging Face API");
+console.log("✅ Deno server starting — proxy to Hugging Face Router (v1 chat/completions)");
 serve(handler);
