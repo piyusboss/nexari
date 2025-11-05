@@ -35,21 +35,20 @@ function extractTextFromHf(data: any): string | null {
   return null;
 }
 
+// 'modelRepo' argument ab sirf logging ke liye istemaal hoga, URL ke liye nahi.
 async function callHf(modelRepo: string, payload: unknown) {
   
-  // ================== GEMINI MODIFY START ==================
-  // YAHI FIX HAI:
-  // Purana 'api-inference.huggingface.co/models/' URL
-  // Naye 'router.huggingface.co/hf-inference/' URL se badal diya gaya hai.
+  // ================== GEMINI MODIFY START (FIX 1) ==================
+  // Naya 'hf-inference' router ek static URL istemaal karta hai.
+  // Model ka naam ab URL ka hissa nahi hai.
   
   // === FIX ===
-  const url = `https://router.huggingface.co/hf-inference/${encodeURIComponent(modelRepo)}`;
+  const url = `https://router.huggingface.co/hf-inference`;
   
   // ==================  GEMINI MODIFY END  ==================
 
   const controller = new AbortController();
   const timeoutMs = 60_000;
-  // Pichla 'timer' wala fix bhi isme shamil hai
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
@@ -60,6 +59,7 @@ async function callHf(modelRepo: string, payload: unknown) {
         "Content-Type": "application/json",
         "Accept": "application/json"
       },
+      // 'payload' mein ab 'model' aur 'inputs' dono hain (handler se aa raha hai)
       body: JSON.stringify(payload),
       signal: controller.signal
     });
@@ -67,9 +67,19 @@ async function callHf(modelRepo: string, payload: unknown) {
     const text = await res.text();
     let data: any;
     try { data = JSON.parse(text); } catch { data = text; }
+    
+    // Yahan ek 'ok' check add karein taaki hum Deno logs mein behtar error dekh sakein
+    // agar Hugging Face 200 OK ke alawa kuch bhejta hai
+    if (!res.ok) {
+       console.error(`❌ Hugging Face API Error (Model: ${modelRepo}): Status ${res.status}`, text);
+       // 'data' mein error details ho sakti hain, use aage pass karein
+       return { ok: false, status: res.status, data };
+    }
+    
     return { ok: res.ok, status: res.status, data };
   } catch (err: any) {
     clearTimeout(timer);
+    console.error(`❌ Fetch Error calling HF (Model: ${modelRepo}): ${err?.message ?? String(err)}`);
     return { ok: false, status: 500, data: { error: err?.message ?? String(err) } };
   }
 }
@@ -94,26 +104,41 @@ async function handler(req: Request): Promise<Response> {
     });
   }
 
-  // script.js se ab 'distilgpt2' aayega
+  // script.js se 'distilgpt2' (ya jo bhi selected hai) aa raha hai
   const model = (body.model ?? "distilgpt2").toString();
 
-  const payload: any = { inputs: input };
+  // ================== GEMINI MODIFY START (FIX 2) ==================
+  // Naye router ko model ka naam 'payload' (body) mein chahiye.
+  
+  // === FIX ===
+  const payload: any = { 
+    model: model, // Model ka naam yahan add karein
+    inputs: input 
+  };
+  // ==================  GEMINI MODIFY END  ==================
+  
   if (body.parameters && typeof body.parameters === "object") payload.parameters = body.parameters;
 
-  // Ab callHf() 'distilgpt2' model ko naye sahi URL par call karega
+  // Ab callHf() naye static URL ko call karega aur payload mein model bhejega
   const hf = await callHf(model, payload);
 
   if (!hf.ok) {
-    let message = hf.data?.error ?? hf.data?.message ?? JSON.stringify(hf.data);
+    // 'hf.data' se error nikalne ki koshish karein (JSON ya text)
+    let message = hf.data?.error ?? hf.data?.message ?? (typeof hf.data === 'string' ? hf.data : JSON.stringify(hf.data));
+    
     if (hf.status === 404) {
       message = `Hugging Face returned 404 Not Found — model not found or inference disabled. Check model id. (Model used: ${model})`;
+    } else if (hf.status === 400) {
+        message = `Hugging Face returned 400 Bad Request. Check payload. (Model: ${model}, Error: ${message})`;
+    } else if (hf.status === 503) {
+         message = `Hugging Face returned 503 Service Unavailable. Model is loading. Try again in a few seconds. (Model: ${model})`;
     }
     
     // Error ko Deno logs mein print karein taaki aap isey dashboard par dekh sakein
-    console.error(`❌ Error calling HF with model '${model}': ${message}`);
+    console.error(`❌ Error response from HF (Model '${model}'): ${message}`);
 
     return new Response(JSON.stringify({ error: message, status: hf.status, details: hf.data }), {
-      status: 502,
+      status: 502, // Bad Gateway (hum proxy hain)
       headers: { ...corsHeaders, "Content-Type": "application/json" }
     });
   }
@@ -136,4 +161,3 @@ async function handler(req: Request): Promise<Response> {
 
 console.log("✅ Deno server starting — proxy to Hugging Face API");
 serve(handler);
-
