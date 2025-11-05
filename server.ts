@@ -48,7 +48,11 @@ async function callHf(modelRepo: string, payload: unknown) {
 
   const controller = new AbortController();
   const timeoutMs = 60_000;
-  const timer = setTimeout(() => controller.abort(), timer);
+  
+  // ================== YAHAN FIX KIYA GAYA HAI ==================
+  // 'timer' ko 'timeoutMs' se badal diya gaya hai
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // ================== END OF FIX ==================
 
   try {
     const res = await fetch(url, {
