@@ -1,4 +1,4 @@
-// server.ts — Deno proxy to Hugging Face Inference API (fixed)
+// server.ts — Deno proxy to Hugging Face Inference API (improved normalization)
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 const HF_API_KEY = Deno.env.get("HF_API_KEY") ?? "";
@@ -14,29 +14,43 @@ const corsHeaders = {
 };
 
 function extractTextFromHf(data: any): string | null {
+  // Common HF shapes -> try to extract a string reply
+  // 1) array of outputs: [{generated_text: "..."}]
   if (Array.isArray(data) && data.length > 0) {
     const first = data[0];
     if (typeof first === "string") return first;
-    if (typeof first.generated_text === "string") return first.generated_text;
-    if (typeof first.text === "string") return first.text;
+    if (first.generated_text) return first.generated_text;
+    if (first.text) return first.text;
     if (first.output && Array.isArray(first.output) && first.output[0]?.generated_text) return first.output[0].generated_text;
   }
+  // 2) object with generated_text
   if (data && typeof data === "object") {
     if (typeof data.generated_text === "string") return data.generated_text;
     if (typeof data.text === "string") return data.text;
+    // Some models return {choices: [{text: "..."}]}
     if (Array.isArray(data.choices) && data.choices[0]?.text) return data.choices[0].text;
   }
+  // 3) plain string
   if (typeof data === "string") return data;
   return null;
 }
 
-async function callHf(modelRepo: string, payload: unknown, timeoutMs = 60_000) {
-  // Use encode per path-segment so slashes remain separators
-  const encodedModel = modelRepo.split("/").map(encodeURIComponent).join("/");
-  const url = `https://api-inference.huggingface.co/models/${encodedModel}`;
+// 'modelRepo' argument ab URL ke liye phir se zaroori hai
+async function callHf(modelRepo: string, payload: unknown) {
+  
+  // ================== GEMINI MODIFY START (Final Fix) ==================
+  // Root Cause: 'router.huggingface.co' URL sirf 'gpt2' jaise paid models ke liye tha.
+  // 'distilgpt2' jaise free models ke liye abhi bhi yahi purana URL sahi hai.
+  
+  // === FIX ===
+  const url = `https://api-inference.huggingface.co/models/${encodeURIComponent(modelRepo)}`;
+  
+  // ==================  GEMINI MODIFY END  ==================
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutMs = 60_000;
+  // Yeh 'timeoutMs' wala fix sahi tha aur rahega
+  const timer = setTimeout(() => controller.abort(), timeoutMs); 
 
   try {
     const res = await fetch(url, {
@@ -46,37 +60,26 @@ async function callHf(modelRepo: string, payload: unknown, timeoutMs = 60_000) {
         "Content-Type": "application/json",
         "Accept": "application/json"
       },
+      // 'payload' mein ab sirf {inputs: "..."} hoga
       body: JSON.stringify(payload),
       signal: controller.signal
     });
     clearTimeout(timer);
-
     const text = await res.text();
     let data: any;
     try { data = JSON.parse(text); } catch { data = text; }
-
-    return { ok: res.ok, status: res.status, data, statusText: res.statusText };
+    
+    if (!res.ok) {
+       console.error(`❌ Hugging Face API Error (Model: ${modelRepo}): Status ${res.status}`, text);
+       return { ok: false, status: res.status, data };
+    }
+    
+    return { ok: res.ok, status: res.status, data };
   } catch (err: any) {
     clearTimeout(timer);
-    // If aborted, err.name is "AbortError"
+    console.error(`❌ Fetch Error calling HF (Model: ${modelRepo}): ${err?.message ?? String(err)}`);
     return { ok: false, status: 500, data: { error: err?.message ?? String(err) } };
   }
-}
-
-async function tryWithFallback(models: string[], payload: unknown) {
-  // Try models sequentially when 404 happens
-  for (const m of models) {
-    const res = await callHf(m, payload);
-    if (res.ok) return { model: m, res };
-    // if 404 -> try next model
-    if (res.status === 404) {
-      console.warn(`Model ${m} returned 404, trying next fallback if any.`);
-      continue;
-    }
-    // for rate limits or server errors, return immediately to the client
-    return { model: m, res };
-  }
-  return null;
 }
 
 async function handler(req: Request): Promise<Response> {
@@ -88,7 +91,7 @@ async function handler(req: Request): Promise<Response> {
   }
 
   let body: any = {};
-  try { body = await req.json(); } catch (e) { /* ignore, will validate below */ }
+  try { body = await req.json(); } catch (e) { /* ignore */ }
 
   const input = body.input ?? body.inputs ?? body.prompt ?? body.message ?? "";
   if (!input || (typeof input === 'string' && input.trim() === "")) {
@@ -98,62 +101,50 @@ async function handler(req: Request): Promise<Response> {
     });
   }
 
-  // Don't silently default to "gpt2" (may be unavailable). Prefer explicit model or a safe fallback list.
-  const clientModel = body.model ?? null;
+  // script.js se 'distilgpt2' aa raha hai, jo sahi hai
+  const model = (body.model ?? "distilgpt2").toString();
 
-  // Fallback list — adjust to models you verify are available for your account.
-  const fallbackModels = [
-    // put verified models here (example)
-    "facebook/bart-large-mnli",
-    "distilbert-base-uncased"
-    // don't include models you know are removed from free inference
-  ];
-
-  const payload: any = { inputs: input };
+  // ================== GEMINI MODIFY START (Final Fix) ==================
+  // Purana API 'model' ko body mein expect nahi karta hai.
+  // === FIX ===
+  const payload: any = { 
+    inputs: input 
+  };
+  // ==================  GEMINI MODIFY END  ==================
+  
   if (body.parameters && typeof body.parameters === "object") payload.parameters = body.parameters;
 
-  let result: any;
-  if (clientModel) {
-    // try requested model first
-    result = await callHf(clientModel.toString(), payload);
-    if (!result.ok && result.status === 404) {
-      // try fallback list if requested model not found
-      const tried = await tryWithFallback(fallbackModels, payload);
-      if (tried) {
-        result = tried.res;
-        console.log(`Fell back to model ${tried.model}`);
-      }
-    }
-  } else {
-    // no client model provided — try fallback list
-    const tried = await tryWithFallback(fallbackModels, payload);
-    if (!tried) {
-      return new Response(JSON.stringify({ error: "No models available from fallback list" }), { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-    }
-    result = tried.res;
-  }
+  // Ab callHf() 'distilgpt2' ko 'modelRepo' ke roop mein
+  // aur {inputs: "..."} ko 'payload' ke roop mein bhejega.
+  const hf = await callHf(model, payload);
 
-  if (!result.ok) {
-    let message = result.data?.error ?? result.data?.message ?? JSON.stringify(result.data);
-    if (result.status === 404) {
-      message = `Hugging Face returned 404 Not Found — model not found or inference disabled. Check model id.`;
+  if (!hf.ok) {
+    let message = hf.data?.error ?? hf.data?.message ?? (typeof hf.data === 'string' ? hf.data : JSON.stringify(hf.data));
+    
+    if (hf.status === 404) {
+      message = `Hugging Face returned 404 Not Found — model not found or inference disabled. Check model id. (Model used: ${model})`;
+    } else if (hf.status === 503) {
+         message = `Hugging Face returned 503 Service Unavailable. Model is loading. Try again in a few seconds. (Model: ${model})`;
     }
-    console.error(`❌ Error calling HF: ${message} (status ${result.status})`);
-    return new Response(JSON.stringify({ error: message, status: result.status, details: result.data }), {
-      status: 502,
+    
+    console.error(`❌ Error response from HF (Model '${model}'): ${message}`);
+
+    return new Response(JSON.stringify({ error: message, status: hf.status, details: hf.data }), {
+      status: 502, 
       headers: { ...corsHeaders, "Content-Type": "application/json" }
     });
   }
 
-  const normalized = extractTextFromHf(result.data);
+  // Try to extract a clean text response for frontend convenience
+  const normalized = extractTextFromHf(hf.data);
   if (normalized !== null) {
-    return new Response(JSON.stringify({ response: normalized, raw: result.data }), {
+    return new Response(JSON.stringify({ response: normalized, raw: hf.data }), {
       status: 200,
       headers: { ...corsHeaders, "Content-Type": "application/json" }
     });
   }
 
-  return new Response(JSON.stringify({ response: result.data }), {
+  return new Response(JSON.stringify({ response: hf.data }), {
     status: 200,
     headers: { ...corsHeaders, "Content-Type": "application/json" }
   });
