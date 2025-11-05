@@ -36,7 +36,12 @@ function extractTextFromHf(data: any): string | null {
 }
 
 async function callHf(modelRepo: string, payload: unknown) {
-  const url = `https://api-inference.huggingface.co/models/${encodeURIComponent(modelRepo)}`;
+  // ================== GEMINI MODIFY START ==================
+  // Purana URL: https://api-inference.huggingface.co/models/...
+  // Naya URL error log ke hisab se update kiya gaya
+  const url = `https://router.huggingface.co/hf-inference/models/${encodeURIComponent(modelRepo)}`;
+  // ==================  GEMINI MODIFY END  ==================
+
   const controller = new AbortController();
   const timeoutMs = 60_000;
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -96,10 +101,8 @@ async function handler(req: Request): Promise<Response> {
       message = `Hugging Face returned 404 Not Found — model not found or inference disabled. Check model id. (Model used: ${model})`;
     }
     
-    // ================== GEMINI MODIFY START ==================
     // Error ko Deno logs mein print karein taaki aap isey dashboard par dekh sakein
     console.error(`❌ Error calling HF with model '${model}': ${message}`);
-    // ==================  GEMINI MODIFY END  ==================
 
     return new Response(JSON.stringify({ error: message, status: hf.status, details: hf.data }), {
       status: 502,
