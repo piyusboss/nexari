@@ -95,6 +95,12 @@ async function handler(req: Request): Promise<Response> {
     if (hf.status === 404) {
       message = `Hugging Face returned 404 Not Found — model not found or inference disabled. Check model id. (Model used: ${model})`;
     }
+    
+    // ================== GEMINI MODIFY START ==================
+    // Error ko Deno logs mein print karein taaki aap isey dashboard par dekh sakein
+    console.error(`❌ Error calling HF with model '${model}': ${message}`);
+    // ==================  GEMINI MODIFY END  ==================
+
     return new Response(JSON.stringify({ error: message, status: hf.status, details: hf.data }), {
       status: 502,
       headers: { ...corsHeaders, "Content-Type": "application/json" }
