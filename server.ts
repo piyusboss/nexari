@@ -1,162 +1,121 @@
+// server.ts — Deno proxy to Hugging Face Inference API (improved normalization)
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
-// ✅✅✅ DEBUGGING FIX: API Key ko yahan hardcode karein ✅✅✅
-// Apni key ko "hf_..." waale quotes ke andar paste karein
-const HF_API_KEY = "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"; 
-
-// Hum check kar rahe hain ki key load hui ya nahi
-if (!HF_API_KEY || HF_API_KEY === "YOUR_HF_API_KEY_HERE") {
-  console.error("❌ FATAL: HF_API_KEY ko code mein hardcode nahi kiya gaya hai!");
-  // Server ko start hi nahi karenge
-  Deno.exit(1); 
-} else {
-  console.log("✅ API Key loaded from code (DEBUG MODE)");
+const HF_API_KEY = Deno.env.get("HF_API_KEY") ?? "";
+if (!HF_API_KEY) {
+  console.error("❌ HF_API_KEY missing. Set HF_API_KEY env variable before starting the server.");
+  Deno.exit(1);
 }
 
-// ✅ Yahi URL sahi hai
-const HF_API_URL = "https://router.huggingface.co/hf-inference";
-
-// ✅ 3. Model Mapping (Hum 'gpt2' se test kar rahe hain)
-const MODEL_MAP: { [key: string]: string } = {
-  "Nexari G1": "gpt2", // Sabse reliable test model
-  "Nexari G2": "google/gemma-7b-it",
-};
-const DEFAULT_MODEL_ID = MODEL_MAP["Nexari G1"];
-
-// ✅ CORS config
 const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "POST, OPTIONS, GET",
+  "access-control-allow-headers": "Content-Type, Authorization",
 };
 
-async function handler(req: Request) {
-  // Handle CORS
-  if (req.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders });
+function extractTextFromHf(data: any): string | null {
+  // Common HF shapes -> try to extract a string reply
+  // 1) array of outputs: [{generated_text: "..."}]
+  if (Array.isArray(data) && data.length > 0) {
+    const first = data[0];
+    if (typeof first === "string") return first;
+    if (first.generated_text) return first.generated_text;
+    if (first.text) return first.text;
+    if (first.output && Array.isArray(first.output) && first.output[0]?.generated_text) return first.output[0].generated_text;
   }
+  // 2) object with generated_text
+  if (data && typeof data === "object") {
+    if (typeof data.generated_text === "string") return data.generated_text;
+    if (typeof data.text === "string") return data.text;
+    // Some models return {choices: [{text: "..."}]}
+    if (Array.isArray(data.choices) && data.choices[0]?.text) return data.choices[0].text;
+  }
+  // 3) plain string
+  if (typeof data === "string") return data;
+  return null;
+}
 
-  // Sirf POST
-  if (req.method !== "POST") {
-    return new Response(JSON.stringify({ error: "Only POST requests allowed" }), {
-      status: 405,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-  }
-
-  // API Key Check (ab yeh check hamesha pass hoga)
-  if (!HF_API_KEY) {
-    console.error("❌ API Key is missing. Request failed.");
-    return new Response(
-      JSON.stringify({ error: "Server configuration error: API Key missing." }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
-  }
+async function callHf(modelRepo: string, payload: unknown) {
+  const url = `https://api-inference.huggingface.co/models/${encodeURIComponent(modelRepo)}`;
+  const controller = new AbortController();
+  const timeoutMs = 60_000;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    // Client se data lein
-    const { message, model } = await req.json();
-
-    if (!message || typeof message !== "string" || message.trim() === "") {
-      return new Response(JSON.stringify({ error: "Message required" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    // Sahi Model ID chunein
-    const modelId = MODEL_MAP[model] || DEFAULT_MODEL_ID;
-    
-    let prompt = message;
-
-    // Prompt formatting
-    if (modelId.includes("mistralai/Mistral")) {
-      prompt = `[INST] ${message} [/INST]`;
-    } else if (modelId.includes("google/gemma")) {
-      prompt = `<start_of_turn>user\n${message}<end_of_turn>\n<start_of_turn>model\n`;
-    }
-
-    console.log(`ℹ️ DEBUG: Calling HF Router for model: ${modelId}`);
-    console.log(`ℹ️ DEBUG: Using Fixed Endpoint: ${HF_API_URL}`);
-
-    // Payload (bilkul sahi hai)
-    const payload = {
-      model: modelId, 
-      inputs: prompt,
-      parameters: {
-        return_full_text: false,
-        max_new_tokens: 50,
-      },
-      options: {
-        wait_for_model: true,
-      },
-    };
-
-    // Hugging Face API ko call karein
-    const response = await fetch(HF_API_URL, {
+    const res = await fetch(url, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${HF_API_KEY}`,
         "Content-Type": "application/json",
+        "Accept": "application/json"
       },
       body: JSON.stringify(payload),
+      signal: controller.signal
     });
-
-    // Error handling
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`❌ Hugging Face API Error (Status: ${response.status}):`, errorText);
-      return new Response(
-        JSON.stringify({ 
-          error: "Hugging Face API failed", 
-          details: errorText || `HTTP status ${response.status}` 
-        }),
-        { status: response.status, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    const data = await response.json();
-
-    // Response ko extract karein
-    let output = data[0]?.generated_text;
-
-    // ... (output cleanup) ...
-    if (output && modelId.includes("google/gemma")) {
-        if (output.startsWith(prompt)) {
-            output = output.substring(prompt.length);
-        }
-        output = output.replace(/<end_of_turn>/g, "").trim();
-    }
-
-    if (!output || output.trim() === "") {
-      console.error("❌ Invalid HF Response Structure:", data);
-      return new Response(
-        JSON.stringify({ response: "Maaf kijiye, model se empty response mila." }),
-        { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    // Client ko response bhej dein
-    console.log("✅ SUCCESS: Test request with hardcoded key was successful!");
-    return new Response(JSON.stringify({ response: output.trim() }), {
-      status: 200,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
-
-  } catch (error) {
-    console.error("💥 Server error:", error);
-    return new Response(JSON.stringify({ error: "Internal server error", details: error.message }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    clearTimeout(timer);
+    const text = await res.text();
+    let data: any;
+    try { data = JSON.parse(text); } catch { data = text; }
+    return { ok: res.ok, status: res.status, data };
+  } catch (err: any) {
+    clearTimeout(timer);
+    return { ok: false, status: 500, data: { error: err?.message ?? String(err) } };
   }
 }
 
-console.log("✅ Deno server starting (HARDCODED KEY TEST)");
-console.log("Registered Hugging Face models (DEBUG MODE):");
-Object.keys(MODEL_MAP).forEach(key => {
-    console.log(`- ${key} -> ${MODEL_MAP[key]}`);
-});
+async function handler(req: Request): Promise<Response> {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
+  if (req.method !== "POST") {
+    return new Response(JSON.stringify({ error: "Use POST" }), { status: 405, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+  }
 
-// Server ko start karein
+  let body: any = {};
+  try { body = await req.json(); } catch (e) { /* ignore */ }
+
+  // Accept multiple keys from client: message / input / prompt
+  const input = body.input ?? body.inputs ?? body.prompt ?? body.message ?? "";
+  if (!input || (typeof input === 'string' && input.trim() === "")) {
+    return new Response(JSON.stringify({ error: "Missing 'input'/'message'/'prompt' in request body" }), {
+      status: 400,
+      headers: { ...corsHeaders, "Content-Type": "application/json" }
+    });
+  }
+
+  const model = (body.model ?? "gpt2").toString();
+
+  const payload: any = { inputs: input };
+  if (body.parameters && typeof body.parameters === "object") payload.parameters = body.parameters;
+
+  const hf = await callHf(model, payload);
+
+  if (!hf.ok) {
+    let message = hf.data?.error ?? hf.data?.message ?? JSON.stringify(hf.data);
+    if (hf.status === 404) {
+      message = `Hugging Face returned 404 Not Found — model not found or inference disabled. Check model id. (Model used: ${model})`;
+    }
+    return new Response(JSON.stringify({ error: message, status: hf.status, details: hf.data }), {
+      status: 502,
+      headers: { ...corsHeaders, "Content-Type": "application/json" }
+    });
+  }
+
+  // Try to extract a clean text response for frontend convenience
+  const normalized = extractTextFromHf(hf.data);
+  if (normalized !== null) {
+    return new Response(JSON.stringify({ response: normalized, raw: hf.data }), {
+      status: 200,
+      headers: { ...corsHeaders, "Content-Type": "application/json" }
+    });
+  }
+
+  // If not extractable, forward raw hf.data as 'response' (frontend can handle object)
+  return new Response(JSON.stringify({ response: hf.data }), {
+    status: 200,
+    headers: { ...corsHeaders, "Content-Type": "application/json" }
+  });
+}
+
+console.log("✅ Deno server starting — proxy to Hugging Face Inference API");
 serve(handler);
