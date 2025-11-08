@@ -98,15 +98,15 @@ function cleanAiResponse(text: string | null): string | null {
 
   let cleanedText = text;
 
-  // 1. Remove common model special tokens (like <|endoftext|>, [PAD], etc.)
+  // 1. Remove common model special tokens
   cleanedText = cleanedText.replace(/<\|.*?\|>/g, "");
   cleanedText = cleanedText.replace(/\[(SEP|CLS|PAD)\]/g, "");
 
-  // 2. Remove the specific Chinese "hash" artifact '井' (jǐng)
-  cleanedText = cleanedText.replace(/井/g, "");
+  // 2. Remove CJK (Chinese/Japanese/Korean) artifacts aggressively
+  // This targets characters like '井', '输', '买' etc.
+  cleanedText = cleanedText.replace(/[\u3000-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF]/g, "");
 
   // 3. Remove Markdown headings (like '### ' or '## ') from the start of lines
-  // (Uses /gm flags: g=global, m=multiline)
   cleanedText = cleanedText.replace(/^\s*#+\s*/gm, "");
 
   // 4. Trim any leading/trailing whitespace left over
@@ -128,11 +128,24 @@ async function handler(req: Request): Promise<Response> {
     return new Response(JSON.stringify({ error: "Missing 'messages' or 'input' in request body." }), { status: 400, headers: corsHeaders });
   }
 
+  // ================== GEMINI MODIFY START (PROMPT ENGINEERING) ==================
+  // Prepend a system prompt to guide the small model
+  // This forces it to be a helpful, concise assistant and stay on topic.
+  const systemPrompt = {
+    role: "system",
+    content: "You are a helpful and professional AI assistant. Provide a clear, concise, and relevant response to the user's request. Stay on topic. Do not include irrelevant information or mix different topics."
+  };
+  
+  if (normalized.messages[0]?.role !== "system") {
+    normalized.messages.unshift(systemPrompt);
+  }
+  // ==================  GEMINI MODIFY END  ==================
+
   // ALWAYS use our SINGLE MODEL
   // Try chat endpoint first (best for multi-message chat)
   const chatPayload: any = {
     model: MODEL_ID,
-    messages: normalized.messages,
+    messages: normalized.messages, // This now includes the system prompt
     stream: false
   };
   // copy optional params
@@ -144,11 +157,8 @@ async function handler(req: Request): Promise<Response> {
 
   if (chatRes.ok) {
     const txt = extractText(chatRes.data);
-    // ================== GEMINI MODIFY START ==================
-    // Clean the text before sending it to the client
-    const cleanedTxt = cleanAiResponse(txt);
+    const cleanedTxt = cleanAiResponse(txt); // Clean the text
     return new Response(JSON.stringify({ response: cleanedTxt ?? chatRes.data, modelUsed: MODEL_ID, endpoint: "chat", raw: chatRes.data }), { status: 200, headers: corsHeaders });
-    // ==================  GEMINI MODIFY END  ==================
   }
 
   // If HF says "not a chat model" (model_not_supported) -> try completions endpoint (same model)
@@ -161,6 +171,7 @@ async function handler(req: Request): Promise<Response> {
 
   if (isNotChat) {
     // Build prompt and call completions path with same MODEL_ID
+    // messagesToPrompt will automatically include the system prompt we added earlier
     const prompt = messagesToPrompt(normalized.messages);
     const compPayload: any = { model: MODEL_ID, prompt };
     if (normalized.max_tokens) compPayload.max_tokens = normalized.max_tokens;
@@ -169,11 +180,8 @@ async function handler(req: Request): Promise<Response> {
     const compRes = await callRouter(COMPLETIONS_PATH, compPayload);
     if (compRes.ok) {
       const txt = extractText(compRes.data);
-      // ================== GEMINI MODIFY START ==================
-      // Clean the text here as well (for the fallback)
-      const cleanedTxt = cleanAiResponse(txt);
+      const cleanedTxt = cleanAiResponse(txt); // Clean the text here as well
       return new Response(JSON.stringify({ response: cleanedTxt ?? compRes.data, modelUsed: MODEL_ID, endpoint: "completions", raw: compRes.data }), { status: 200, headers: corsHeaders });
-      // ==================  GEMINI MODIFY END  ==================
     }
     try { console.error(`❌ Upstream HF completions error (status ${compRes.status}):`, JSON.stringify(compRes.data, null, 2)); } catch(e){ console.error(compRes.data); }
     // If completions also failed, return that error to client
