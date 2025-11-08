@@ -87,6 +87,35 @@ function extractText(data: any): string | null {
   return null;
 }
 
+// ================== GEMINI MODIFY START ==================
+/**
+ * Cleans AI response from model-specific artifacts.
+ * @param text The raw text from the AI.
+ * @returns A cleaned string, or null.
+ */
+function cleanAiResponse(text: string | null): string | null {
+  if (!text) return null;
+
+  let cleanedText = text;
+
+  // 1. Remove common model special tokens (like <|endoftext|>, [PAD], etc.)
+  cleanedText = cleanedText.replace(/<\|.*?\|>/g, "");
+  cleanedText = cleanedText.replace(/\[(SEP|CLS|PAD)\]/g, "");
+
+  // 2. Remove the specific Chinese "hash" artifact '井' (jǐng)
+  cleanedText = cleanedText.replace(/井/g, "");
+
+  // 3. Remove Markdown headings (like '### ' or '## ') from the start of lines
+  // (Uses /gm flags: g=global, m=multiline)
+  cleanedText = cleanedText.replace(/^\s*#+\s*/gm, "");
+
+  // 4. Trim any leading/trailing whitespace left over
+  cleanedText = cleanedText.trim();
+
+  return cleanedText;
+}
+// ==================  GEMINI MODIFY END  ==================
+
 async function handler(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
   if (req.method !== "POST") return new Response(JSON.stringify({ error: "Use POST" }), { status: 405, headers: corsHeaders });
@@ -115,7 +144,11 @@ async function handler(req: Request): Promise<Response> {
 
   if (chatRes.ok) {
     const txt = extractText(chatRes.data);
-    return new Response(JSON.stringify({ response: txt ?? chatRes.data, modelUsed: MODEL_ID, endpoint: "chat", raw: chatRes.data }), { status: 200, headers: corsHeaders });
+    // ================== GEMINI MODIFY START ==================
+    // Clean the text before sending it to the client
+    const cleanedTxt = cleanAiResponse(txt);
+    return new Response(JSON.stringify({ response: cleanedTxt ?? chatRes.data, modelUsed: MODEL_ID, endpoint: "chat", raw: chatRes.data }), { status: 200, headers: corsHeaders });
+    // ==================  GEMINI MODIFY END  ==================
   }
 
   // If HF says "not a chat model" (model_not_supported) -> try completions endpoint (same model)
@@ -136,7 +169,11 @@ async function handler(req: Request): Promise<Response> {
     const compRes = await callRouter(COMPLETIONS_PATH, compPayload);
     if (compRes.ok) {
       const txt = extractText(compRes.data);
-      return new Response(JSON.stringify({ response: txt ?? compRes.data, modelUsed: MODEL_ID, endpoint: "completions", raw: compRes.data }), { status: 200, headers: corsHeaders });
+      // ================== GEMINI MODIFY START ==================
+      // Clean the text here as well (for the fallback)
+      const cleanedTxt = cleanAiResponse(txt);
+      return new Response(JSON.stringify({ response: cleanedTxt ?? compRes.data, modelUsed: MODEL_ID, endpoint: "completions", raw: compRes.data }), { status: 200, headers: corsHeaders });
+      // ==================  GEMINI MODIFY END  ==================
     }
     try { console.error(`❌ Upstream HF completions error (status ${compRes.status}):`, JSON.stringify(compRes.data, null, 2)); } catch(e){ console.error(compRes.data); }
     // If completions also failed, return that error to client
