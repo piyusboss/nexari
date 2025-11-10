@@ -1,4 +1,5 @@
 // server.ts — Deno proxy locked to deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+// --- MODIFIED TO SUPPORT STREAMING ---
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 const HF_API_KEY = Deno.env.get("HF_API_KEY") ?? "";
@@ -18,7 +19,8 @@ const corsHeaders = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "POST, OPTIONS, GET",
   "access-control-allow-headers": "Content-Type, Authorization",
-  "Content-Type": "application/json"
+  // --- STREAMING FIX: Remove 'application/json' for streams ---
+  // "Content-Type": "application/json" // This will be set per-response
 };
 
 function isString(x: any) { return typeof x === "string"; }
@@ -39,7 +41,8 @@ function normalizeIncoming(body: any) {
   return out;
 }
 
-async function callRouter(path: string, payload: unknown, timeoutMs = 60_000) {
+// --- NON-STREAMING: Renamed from callRouter ---
+async function callRouterJson(path: string, payload: unknown, timeoutMs = 60_000) {
   const url = `${ROUTER_BASE}${path}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -61,6 +64,41 @@ async function callRouter(path: string, payload: unknown, timeoutMs = 60_000) {
   } catch (err: any) {
     clearTimeout(timer);
     return { ok: false, status: 500, statusText: err?.name ?? "Error", data: { error: err?.message ?? String(err) } };
+  }
+}
+
+// --- NEW STREAMING: Function to call and pipe the stream ---
+async function callRouterStream(path: string, payload: unknown): Promise<Response> {
+  const url = `${ROUTER_BASE}${path}`;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${HF_API_KEY}`,
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream" // Request a stream
+      },
+      body: JSON.stringify(payload),
+    });
+
+    // We pipe the response body (a ReadableStream) directly to our client.
+    // We must also forward the content-type (e.g., 'text/event-stream')
+    // and handle CORS headers.
+    const responseHeaders = new Headers(corsHeaders);
+    responseHeaders.set("Content-Type", res.headers.get("Content-Type") || "text/event-stream");
+    responseHeaders.set("Cache-Control", "no-cache");
+    
+    return new Response(res.body, {
+      status: res.status,
+      headers: responseHeaders
+    });
+
+  } catch (err: any) {
+    // If the fetch itself fails (e.g., network error)
+    return new Response(JSON.stringify({ error: err?.message ?? String(err) }), { 
+      status: 500, 
+      headers: { ...corsHeaders, "Content-Type": "application/json" } 
+    });
   }
 }
 
@@ -88,15 +126,21 @@ function extractText(data: any): string | null {
 }
 
 async function handler(req: Request): Promise<Response> {
+  const responseHeaders = new Headers(corsHeaders);
+
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
-  if (req.method !== "POST") return new Response(JSON.stringify({ error: "Use POST" }), { status: 405, headers: corsHeaders });
+  if (req.method !== "POST") {
+    responseHeaders.set("Content-Type", "application/json");
+    return new Response(JSON.stringify({ error: "Use POST" }), { status: 405, headers: responseHeaders });
+  }
 
   let body: any = {};
   try { body = await req.json(); } catch { /* ignore */ }
 
   const normalized = normalizeIncoming(body);
   if (!Array.isArray(normalized.messages) || normalized.messages.length === 0) {
-    return new Response(JSON.stringify({ error: "Missing 'messages' or 'input' in request body." }), { status: 400, headers: corsHeaders });
+    responseHeaders.set("Content-Type", "application/json");
+    return new Response(JSON.stringify({ error: "Missing 'messages' or 'input' in request body." }), { status: 400, headers: responseHeaders });
   }
 
   // ALWAYS use our SINGLE MODEL
@@ -104,18 +148,28 @@ async function handler(req: Request): Promise<Response> {
   const chatPayload: any = {
     model: MODEL_ID,
     messages: normalized.messages,
-    stream: false
   };
   // copy optional params
   for (const k of ["max_tokens","temperature","top_p","n","stop","stream"]) if (k in normalized) chatPayload[k] = normalized[k];
 
-  console.log(`➡️ Calling HF Router (chat) with model: ${MODEL_ID} messages:${normalized.messages.length}`);
+  // --- STREAMING LOGIC ---
+  if (chatPayload.stream === true) {
+    console.log(`➡️ Calling HF Router (STREAM) with model: ${MODEL_ID} messages:${normalized.messages.length}`);
+    // This function returns a complete Response object (piping the stream)
+    return await callRouterStream(CHAT_PATH, chatPayload);
+  }
+  // --- END STREAMING LOGIC ---
 
-  const chatRes = await callRouter(CHAT_PATH, chatPayload);
+
+  // --- NON-STREAMING LOGIC (Unchanged) ---
+  console.log(`➡️ Calling HF Router (JSON) with model: ${MODEL_ID} messages:${normalized.messages.length}`);
+  responseHeaders.set("Content-Type", "application/json"); // Set for all JSON responses
+
+  const chatRes = await callRouterJson(CHAT_PATH, chatPayload);
 
   if (chatRes.ok) {
     const txt = extractText(chatRes.data);
-    return new Response(JSON.stringify({ response: txt ?? chatRes.data, modelUsed: MODEL_ID, endpoint: "chat", raw: chatRes.data }), { status: 200, headers: corsHeaders });
+    return new Response(JSON.stringify({ response: txt ?? chatRes.data, modelUsed: MODEL_ID, endpoint: "chat", raw: chatRes.data }), { status: 200, headers: responseHeaders });
   }
 
   // If HF says "not a chat model" (model_not_supported) -> try completions endpoint (same model)
@@ -133,23 +187,23 @@ async function handler(req: Request): Promise<Response> {
     if (normalized.max_tokens) compPayload.max_tokens = normalized.max_tokens;
     if (normalized.temperature) compPayload.temperature = normalized.temperature;
     console.log(`➡️ Falling back to completions endpoint (same model): ${MODEL_ID}`);
-    const compRes = await callRouter(COMPLETIONS_PATH, compPayload);
+    const compRes = await callRouterJson(COMPLETIONS_PATH, compPayload);
     if (compRes.ok) {
       const txt = extractText(compRes.data);
-      return new Response(JSON.stringify({ response: txt ?? compRes.data, modelUsed: MODEL_ID, endpoint: "completions", raw: compRes.data }), { status: 200, headers: corsHeaders });
+      return new Response(JSON.stringify({ response: txt ?? compRes.data, modelUsed: MODEL_ID, endpoint: "completions", raw: compRes.data }), { status: 200, headers: responseHeaders });
     }
     try { console.error(`❌ Upstream HF completions error (status ${compRes.status}):`, JSON.stringify(compRes.data, null, 2)); } catch(e){ console.error(compRes.data); }
     // If completions also failed, return that error to client
-    return new Response(JSON.stringify({ error: `Upstream HF completions error (status ${compRes.status})`, details: compRes.data }), { status: 502, headers: corsHeaders });
+    return new Response(JSON.stringify({ error: `Upstream HF completions error (status ${compRes.status})`, details: compRes.data }), { status: 502, headers: responseHeaders });
   }
 
   // If chatRes failure is auth/payment or rate-limit, bubble up
   if ([401,403,402,429].includes(chatRes.status)) {
-    return new Response(JSON.stringify({ error: `Upstream HF error (status ${chatRes.status})`, details: chatRes.data }), { status: 502, headers: corsHeaders });
+    return new Response(JSON.stringify({ error: `Upstream HF error (status ${chatRes.status})`, details: chatRes.data }), { status: 502, headers: responseHeaders });
   }
 
   // Otherwise treat as model-not-found/other — return HF details
-  return new Response(JSON.stringify({ error: `Upstream HF chat error (status ${chatRes.status})`, details: chatRes.data }), { status: 502, headers: corsHeaders });
+  return new Response(JSON.stringify({ error: `Upstream HF chat error (status ${chatRes.status})`, details: chatRes.data }), { status: 502, headers: responseHeaders });
 }
 
 console.log("✅ Deno server starting — locked to model:", MODEL_ID);
