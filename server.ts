@@ -1,15 +1,36 @@
-// server.ts — Deno proxy locked to deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
-// --- MODIFIED TO SUPPORT STREAMING ---
+// server.ts — Deno proxy (MODIFIED FOR DUAL API KEY ROUTING)
+// --- MODIFIED TO SUPPORT STREAMING AND MODEL SWITCHING ---
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
+// === KEY 1 (DeepSeek) ===
 const HF_API_KEY = Deno.env.get("HF_API_KEY") ?? "";
 if (!HF_API_KEY) {
-  console.error("❌ HF_API_KEY missing. Set HF_API_KEY env variable before starting the server.");
-  Deno.exit(1);
+  console.warn("⚠️ HF_API_KEY (default) missing. DeepSeek-R1 model may fail.");
+  // Don't exit, maybe user only wants to use NEW_MODEL
 }
 
-// === SINGLE MODEL (locked) ===
-const MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
+// === KEY 2 (Nexari G1 / New Model) ===
+const NEW_API_KEY = Deno.env.get("NEW_MODEL") ?? "";
+if (!NEW_API_KEY) {
+  console.warn("⚠️ NEW_MODEL key missing. 'Nexari G1' model will not work.");
+}
+
+// === MODEL MAPPING ===
+// Map 'value' from index.html to Hugging Face Model IDs
+const MODEL_MAP: Record<string, { id: string; key: string }> = {
+  "DeepSeek-R1": {
+    id: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    key: HF_API_KEY,
+  },
+  "Nexari-G1": {
+    // === ZAROORI: Is line ko apne naye model ID se badlein ===
+    id: "mistralai/Mistral-7B-Instruct-v0.2", // Jaise "mistralai/Mistral-7B-Instruct-v0.2"
+    key: NEW_API_KEY,
+  },
+};
+// Default model agar user kuch na bheje
+const DEFAULT_MODEL_KEY = "DeepSeek-R1";
+
 
 const ROUTER_BASE = "https://router.huggingface.co/v1";
 const CHAT_PATH = "/chat/completions";
@@ -19,8 +40,6 @@ const corsHeaders = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "POST, OPTIONS, GET",
   "access-control-allow-headers": "Content-Type, Authorization",
-  // --- STREAMING FIX: Remove 'application/json' for streams ---
-  // "Content-Type": "application/json" // This will be set per-response
 };
 
 function isString(x: any) { return typeof x === "string"; }
@@ -36,13 +55,14 @@ function normalizeIncoming(body: any) {
     out.messages = [{ role: "user", content: isString(text) ? text : String(text ?? "") }];
   }
   // forward a small safe set of params if present
-  const allowed = ["max_tokens", "temperature", "top_p", "n", "stop", "stream"];
+  // === MODIFIED: 'model' ko bhi forward karein ===
+  const allowed = ["max_tokens", "temperature", "top_p", "n", "stop", "stream", "model"];
   for (const k of allowed) if (k in body) out[k] = body[k];
   return out;
 }
 
-// --- NON-STREAMING: Renamed from callRouter ---
-async function callRouterJson(path: string, payload: unknown, timeoutMs = 60_000) {
+// --- MODIFIED: Accepts apiKey as an argument ---
+async function callRouterJson(path: string, payload: unknown, apiKey: string, timeoutMs = 60_000) {
   const url = `${ROUTER_BASE}${path}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -50,7 +70,7 @@ async function callRouterJson(path: string, payload: unknown, timeoutMs = 60_000
     const res = await fetch(url, {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${HF_API_KEY}`,
+        "Authorization": `Bearer ${apiKey}`, // <-- MODIFIED
         "Content-Type": "application/json",
         "Accept": "application/json"
       },
@@ -67,14 +87,14 @@ async function callRouterJson(path: string, payload: unknown, timeoutMs = 60_000
   }
 }
 
-// --- NEW STREAMING: Function to call and pipe the stream ---
-async function callRouterStream(path: string, payload: unknown): Promise<Response> {
+// --- MODIFIED: Accepts apiKey as an argument ---
+async function callRouterStream(path: string, payload: unknown, apiKey: string): Promise<Response> {
   const url = `${ROUTER_BASE}${path}`;
   try {
     const res = await fetch(url, {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${HF_API_KEY}`,
+        "Authorization": `Bearer ${apiKey}`, // <-- MODIFIED
         "Content-Type": "application/json",
         "Accept": "text/event-stream" // Request a stream
       },
@@ -143,20 +163,45 @@ async function handler(req: Request): Promise<Response> {
     return new Response(JSON.stringify({ error: "Missing 'messages' or 'input' in request body." }), { status: 400, headers: responseHeaders });
   }
 
-  // ALWAYS use our SINGLE MODEL
+  // === NEW ROUTING LOGIC START ===
+  const modelKey = normalized.model || DEFAULT_MODEL_KEY;
+  const modelConfig = MODEL_MAP[modelKey];
+
+  if (!modelConfig) {
+    responseHeaders.set("Content-Type", "application/json");
+    return new Response(JSON.stringify({ error: `Model '${modelKey}' is not configured on the server.` }), { status: 400, headers: responseHeaders });
+  }
+  
+  if (modelConfig.id === "YOUR_NEW_MODEL_ID_HERE") {
+     console.error(`❌ 'Nexari-G1' model ID is not set. Please update 'YOUR_NEW_MODEL_ID_HERE' in server.ts`);
+     responseHeaders.set("Content-Type", "application/json");
+     return new Response(JSON.stringify({ error: `Server configuration error: 'Nexari-G1' model ID is not set.` }), { status: 500, headers: responseHeaders });
+  }
+
+  if (!modelConfig.key) {
+    console.error(`❌ API key for model '${modelKey}' (ID: ${modelConfig.id}) is missing.`);
+    responseHeaders.set("Content-Type", "application/json");
+    return new Response(JSON.stringify({ error: `Server configuration error: API key for model '${modelKey}' is not set.` }), { status: 500, headers: responseHeaders });
+  }
+  
+  const MODEL_ID = modelConfig.id;
+  const API_KEY_TO_USE = modelConfig.key;
+  // === NEW ROUTING LOGIC END ===
+
+
   // Try chat endpoint first (best for multi-message chat)
   const chatPayload: any = {
-    model: MODEL_ID,
+    model: MODEL_ID, // <-- Use routed model ID
     messages: normalized.messages,
   };
-  // copy optional params
+  // copy optional params (lekin 'model' ko dobara copy na karein)
   for (const k of ["max_tokens","temperature","top_p","n","stop","stream"]) if (k in normalized) chatPayload[k] = normalized[k];
 
   // --- STREAMING LOGIC ---
   if (chatPayload.stream === true) {
     console.log(`➡️ Calling HF Router (STREAM) with model: ${MODEL_ID} messages:${normalized.messages.length}`);
     // This function returns a complete Response object (piping the stream)
-    return await callRouterStream(CHAT_PATH, chatPayload);
+    return await callRouterStream(CHAT_PATH, chatPayload, API_KEY_TO_USE); // <-- Use routed API key
   }
   // --- END STREAMING LOGIC ---
 
@@ -165,7 +210,7 @@ async function handler(req: Request): Promise<Response> {
   console.log(`➡️ Calling HF Router (JSON) with model: ${MODEL_ID} messages:${normalized.messages.length}`);
   responseHeaders.set("Content-Type", "application/json"); // Set for all JSON responses
 
-  const chatRes = await callRouterJson(CHAT_PATH, chatPayload);
+  const chatRes = await callRouterJson(CHAT_PATH, chatPayload, API_KEY_TO_USE); // <-- Use routed API key
 
   if (chatRes.ok) {
     const txt = extractText(chatRes.data);
@@ -187,7 +232,7 @@ async function handler(req: Request): Promise<Response> {
     if (normalized.max_tokens) compPayload.max_tokens = normalized.max_tokens;
     if (normalized.temperature) compPayload.temperature = normalized.temperature;
     console.log(`➡️ Falling back to completions endpoint (same model): ${MODEL_ID}`);
-    const compRes = await callRouterJson(COMPLETIONS_PATH, compPayload);
+    const compRes = await callRouterJson(COMPLETIONS_PATH, compPayload, API_KEY_TO_USE); // <-- Use routed API key
     if (compRes.ok) {
       const txt = extractText(compRes.data);
       return new Response(JSON.stringify({ response: txt ?? compRes.data, modelUsed: MODEL_ID, endpoint: "completions", raw: compRes.data }), { status: 200, headers: responseHeaders });
@@ -206,5 +251,7 @@ async function handler(req: Request): Promise<Response> {
   return new Response(JSON.stringify({ error: `Upstream HF chat error (status ${chatRes.status})`, details: chatRes.data }), { status: 502, headers: responseHeaders });
 }
 
-console.log("✅ Deno server starting — locked to model:", MODEL_ID);
+console.log("✅ Deno server starting — (Dual Key Mode)");
+console.log(`🔑 Default (DeepSeek-R1) Key: ${HF_API_KEY ? "Loaded" : "MISSING"}`);
+console.log(`🔑 Nexari G1 (NEW_MODEL) Key: ${NEW_API_KEY ? "Loaded" : "MISSING"}`);
 serve(handler);
