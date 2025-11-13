@@ -24,7 +24,8 @@ const MODEL_MAP: Record<string, { id: string; key: string }> = {
   },
   "Nexari-G1": {
     // === ZAROORI: Is line ko apne naye model ID se badlein ===
-    id: "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", // Jaise "mistralai/Mistral-7B-Instruct-v0.2"
+    // Naya model ID yahan daalein
+    id: "mistralai/Mistral-7B-Instruct-v0.2", // Example: Main ise Mistral se replace kar raha hoon
     key: NEW_API_KEY,
   },
 };
@@ -101,20 +102,39 @@ async function callRouterStream(path: string, payload: unknown, apiKey: string):
       body: JSON.stringify(payload),
     });
 
-    // We pipe the response body (a ReadableStream) directly to our client.
-    // We must also forward the content-type (e.g., 'text/event-stream')
-    // and handle CORS headers.
+    // ===============================================
+    // ===         YAHI HAI ASLI BUG FIX           ===
+    // ===============================================
+    // Check karein ki Hugging Face ne 200 OK bheja hai ya nahi
+    if (!res.ok) {
+        const errorText = await res.text();
+        // Ab yeh aapke Deno logs mein dikhega!
+        console.error(`❌ Upstream HF Stream Error (Status: ${res.status}): ${errorText}`);
+        
+        // Client (script.js) ko bhi ek JSON error bhejein
+        // Note: Hum status 502 (Bad Gateway) bhej rahe hain
+        return new Response(JSON.stringify({ error: `Upstream HF error (Status: ${res.status})`, details: errorText }), { 
+          status: 502, // Bad Gateway
+          headers: { ...corsHeaders, "Content-Type": "application/json" } 
+        });
+    }
+    // ===============================================
+    // ===            BUG FIX END                  ===
+    // ===============================================
+
+    // Agar sab theek hai (res.ok is true), toh stream ko pipe karein
     const responseHeaders = new Headers(corsHeaders);
     responseHeaders.set("Content-Type", res.headers.get("Content-Type") || "text/event-stream");
     responseHeaders.set("Cache-Control", "no-cache");
     
     return new Response(res.body, {
-      status: res.status,
+      status: res.status, // Yeh 200 OK hoga
       headers: responseHeaders
     });
 
   } catch (err: any) {
-    // If the fetch itself fails (e.g., network error)
+    // Agar fetch (network level) hi fail ho jaaye
+    console.error(`❌ Network error calling HF: ${err.message ?? String(err)}`);
     return new Response(JSON.stringify({ error: err?.message ?? String(err) }), { 
       status: 500, 
       headers: { ...corsHeaders, "Content-Type": "application/json" } 
