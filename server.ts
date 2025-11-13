@@ -24,7 +24,7 @@ const MODEL_MAP: Record<string, { id: string; key: string }> = {
   },
   "Nexari-G1": {
     // === ZAROORI: Is line ko apne naye model ID se badlein ===
-    id: "mistralai/Mistral-7B-Instruct-v0.2", // Jaise "mistralai/Mistral-7B-Instruct-v0.2"
+    id: "mistralai/Mistral-7B-Instruct-v0.3", // Jaise "mistralai/Mistral-7B-Instruct-v0.2"
     key: NEW_API_KEY,
   },
 };
