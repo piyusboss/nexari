@@ -55,7 +55,7 @@ function normalizeIncoming(body: any) {
     out.messages = [{ role: "user", content: isString(text) ? text : String(text ?? "") }];
   }
   // forward a small safe set of params if present
-  // === MODIFIED: 'model' ko bhi forward karein ===
+  // === YAHI HAI FIX: 'model' ko 'allowed' array mein add kiya gaya hai ===
   const allowed = ["max_tokens", "temperature", "top_p", "n", "stop", "stream", "model"];
   for (const k of allowed) if (k in body) out[k] = body[k];
   return out;
@@ -101,20 +101,35 @@ async function callRouterStream(path: string, payload: unknown, apiKey: string):
       body: JSON.stringify(payload),
     });
 
-    // We pipe the response body (a ReadableStream) directly to our client.
-    // We must also forward the content-type (e.g., 'text/event-stream')
-    // and handle CORS headers.
+    // === YEH ERROR CHECKING HAI (Jo pehle missing tha) ===
+    // Check karein ki Hugging Face ne 200 OK bheja hai ya nahi
+    if (!res.ok) {
+        const errorText = await res.text();
+        // Ab yeh aapke Deno logs mein dikhega!
+        console.error(`❌ Upstream HF Stream Error (Status: ${res.status}): ${errorText}`);
+        
+        // Client (script.js) ko bhi ek JSON error bhejein
+        // Note: Hum status 502 (Bad Gateway) bhej rahe hain
+        return new Response(JSON.stringify({ error: `Upstream HF error (Status: ${res.status})`, details: errorText }), { 
+          status: 502, // Bad Gateway
+          headers: { ...corsHeaders, "Content-Type": "application/json" } 
+        });
+    }
+    // === ERROR CHECKING END ===
+
+    // Agar sab theek hai (res.ok is true), toh stream ko pipe karein
     const responseHeaders = new Headers(corsHeaders);
     responseHeaders.set("Content-Type", res.headers.get("Content-Type") || "text/event-stream");
     responseHeaders.set("Cache-Control", "no-cache");
     
     return new Response(res.body, {
-      status: res.status,
+      status: res.status, // Yeh 200 OK hoga
       headers: responseHeaders
     });
 
   } catch (err: any) {
-    // If the fetch itself fails (e.g., network error)
+    // Agar fetch (network level) hi fail ho jaaye
+    console.error(`❌ Network error calling HF: ${err.message ?? String(err)}`);
     return new Response(JSON.stringify({ error: err?.message ?? String(err) }), { 
       status: 500, 
       headers: { ...corsHeaders, "Content-Type": "application/json" } 
@@ -157,14 +172,14 @@ async function handler(req: Request): Promise<Response> {
   let body: any = {};
   try { body = await req.json(); } catch { /* ignore */ }
 
-  const normalized = normalizeIncoming(body);
+  const normalized = normalizeIncoming(body); // <-- Yahan 'model' field preserve hoga
   if (!Array.isArray(normalized.messages) || normalized.messages.length === 0) {
     responseHeaders.set("Content-Type", "application/json");
     return new Response(JSON.stringify({ error: "Missing 'messages' or 'input' in request body." }), { status: 400, headers: responseHeaders });
   }
 
-  // === NEW ROUTING LOGIC START ===
-  const modelKey = normalized.model || DEFAULT_MODEL_KEY;
+  // === YEH HAI ASLI ROUTING LOGIC ===
+  const modelKey = normalized.model || DEFAULT_MODEL_KEY; // <-- "Nexari-G1" yahan aayega
   const modelConfig = MODEL_MAP[modelKey];
 
   if (!modelConfig) {
@@ -184,14 +199,14 @@ async function handler(req: Request): Promise<Response> {
     return new Response(JSON.stringify({ error: `Server configuration error: API key for model '${modelKey}' is not set.` }), { status: 500, headers: responseHeaders });
   }
   
-  const MODEL_ID = modelConfig.id;
-  const API_KEY_TO_USE = modelConfig.key;
-  // === NEW ROUTING LOGIC END ===
+  const MODEL_ID = modelConfig.id; // <-- Yahan naya model ID (e.g., Mistral) set hoga
+  const API_KEY_TO_USE = modelConfig.key; // <-- Yahan NEW_MODEL ki key set hogi
+  // === ROUTING LOGIC END ===
 
 
   // Try chat endpoint first (best for multi-message chat)
   const chatPayload: any = {
-    model: MODEL_ID, // <-- Use routed model ID
+    model: MODEL_ID, // <-- Yahan ab hardcoded nahi hai
     messages: normalized.messages,
   };
   // copy optional params (lekin 'model' ko dobara copy na karein)
@@ -201,7 +216,7 @@ async function handler(req: Request): Promise<Response> {
   if (chatPayload.stream === true) {
     console.log(`➡️ Calling HF Router (STREAM) with model: ${MODEL_ID} messages:${normalized.messages.length}`);
     // This function returns a complete Response object (piping the stream)
-    return await callRouterStream(CHAT_PATH, chatPayload, API_KEY_TO_USE); // <-- Use routed API key
+    return await callRouterStream(CHAT_PATH, chatPayload, API_KEY_TO_USE); // <-- Sahi API key bhejega
   }
   // --- END STREAMING LOGIC ---
 
@@ -210,7 +225,7 @@ async function handler(req: Request): Promise<Response> {
   console.log(`➡️ Calling HF Router (JSON) with model: ${MODEL_ID} messages:${normalized.messages.length}`);
   responseHeaders.set("Content-Type", "application/json"); // Set for all JSON responses
 
-  const chatRes = await callRouterJson(CHAT_PATH, chatPayload, API_KEY_TO_USE); // <-- Use routed API key
+  const chatRes = await callRouterJson(CHAT_PATH, chatPayload, API_KEY_TO_USE); // <-- Sahi API key bhejega
 
   if (chatRes.ok) {
     const txt = extractText(chatRes.data);
@@ -232,7 +247,7 @@ async function handler(req: Request): Promise<Response> {
     if (normalized.max_tokens) compPayload.max_tokens = normalized.max_tokens;
     if (normalized.temperature) compPayload.temperature = normalized.temperature;
     console.log(`➡️ Falling back to completions endpoint (same model): ${MODEL_ID}`);
-    const compRes = await callRouterJson(COMPLETIONS_PATH, compPayload, API_KEY_TO_USE); // <-- Use routed API key
+    const compRes = await callRouterJson(COMPLETIONS_PATH, compPayload, API_KEY_TO_USE); // <-- Sahi API key bhejega
     if (compRes.ok) {
       const txt = extractText(compRes.data);
       return new Response(JSON.stringify({ response: txt ?? compRes.data, modelUsed: MODEL_ID, endpoint: "completions", raw: compRes.data }), { status: 200, headers: responseHeaders });
