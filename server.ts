@@ -1,4 +1,4 @@
-// server.ts — Deno proxy with Enhanced Error Handling
+// server.ts — Deno proxy with Model Switching & Enhanced Error Handling
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 const HF_API_KEY = Deno.env.get("HF_API_KEY") ?? "";
@@ -7,8 +7,18 @@ if (!HF_API_KEY) {
   Deno.exit(1);
 }
 
-// === SINGLE MODEL (locked) ===
-const MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
+// === MODEL CONFIGURATION ===
+// Maps frontend "friendly names" to Hugging Face Model IDs
+const MODELS: Record<string, string> = {
+  // Default / Fast Model
+  "DeepSeek-R1": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+  
+  // Premium / High-Intelligence Model (Nexari G1)
+  // Selected: Qwen 2.5 72B Instruct - SOTA performance for open weights
+  "Nexari G1": "Qwen/Qwen2.5-72B-Instruct", 
+};
+
+const DEFAULT_MODEL = "DeepSeek-R1";
 
 const ROUTER_BASE = "https://router.huggingface.co/v1";
 const CHAT_PATH = "/chat/completions";
@@ -23,13 +33,11 @@ const corsHeaders = {
 function isString(x: any) { return typeof x === "string"; }
 function safeJsonParse(text: string) { try { return JSON.parse(text); } catch { return null; } }
 
-// --- NEW: Error Formatting Logic ---
+// --- Error Formatting Logic ---
 function formatHfError(status: number, rawBody: string) {
   let code = "UNKNOWN_ERROR";
   let message = "An unexpected error occurred while contacting the AI model.";
-  let details = rawBody;
-
-  // Attempt to parse raw body for specific HF messages
+  
   const jsonBody = safeJsonParse(rawBody);
   const hfErrorMsg = jsonBody?.error?.message || jsonBody?.error || rawBody;
 
@@ -41,7 +49,7 @@ function formatHfError(status: number, rawBody: string) {
     message = "Too many requests. The AI server is currently busy. Please wait a moment before trying again.";
   } else if (status === 401 || status === 403) {
     code = "AUTH_ERROR";
-    message = "Authentication failed with the AI provider. Please check the server configuration.";
+    message = "Authentication failed with the AI provider. Please check server configuration.";
   } else if (status === 400) {
     code = "INVALID_REQUEST";
     message = "The request was invalid. Your prompt might be too long.";
@@ -50,7 +58,6 @@ function formatHfError(status: number, rawBody: string) {
     message = "The AI provider is experiencing connection issues.";
   }
 
-  // Specific check for "Model is too large" or "context length" in body
   if (typeof hfErrorMsg === 'string' && hfErrorMsg.toLowerCase().includes("context length")) {
       code = "CONTEXT_LIMIT";
       message = "The conversation is too long for this model. Please start a new chat.";
@@ -60,7 +67,7 @@ function formatHfError(status: number, rawBody: string) {
     error: {
       code,
       message,
-      details: hfErrorMsg // Developer details
+      details: hfErrorMsg 
     }
   };
 }
@@ -73,13 +80,19 @@ function normalizeIncoming(body: any) {
     const text = body.input ?? body.inputs ?? body.prompt ?? body.message;
     out.messages = [{ role: "user", content: isString(text) ? text : String(text ?? "") }];
   }
+  
+  // Capture the model field from the request
+  if (body.model && typeof body.model === "string") {
+    out.model = body.model;
+  }
+
   const allowed = ["max_tokens", "temperature", "top_p", "n", "stop", "stream"];
   for (const k of allowed) if (k in body) out[k] = body[k];
   return out;
 }
 
 // --- NON-STREAMING: Call Router JSON ---
-async function callRouterJson(path: string, payload: unknown, timeoutMs = 60_000) {
+async function callRouterJson(modelId: string, path: string, payload: unknown, timeoutMs = 60_000) {
   const url = `${ROUTER_BASE}${path}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -98,7 +111,6 @@ async function callRouterJson(path: string, payload: unknown, timeoutMs = 60_000
     
     const text = await res.text();
     
-    // Handle API Errors specifically
     if (!res.ok) {
         const formatted = formatHfError(res.status, text);
         return { ok: false, status: res.status, statusText: res.statusText, data: formatted };
@@ -114,7 +126,7 @@ async function callRouterJson(path: string, payload: unknown, timeoutMs = 60_000
 }
 
 // --- STREAMING: Call Router Stream ---
-async function callRouterStream(path: string, payload: unknown): Promise<Response> {
+async function callRouterStream(modelId: string, path: string, payload: unknown): Promise<Response> {
   const url = `${ROUTER_BASE}${path}`;
   try {
     const res = await fetch(url, {
@@ -127,20 +139,16 @@ async function callRouterStream(path: string, payload: unknown): Promise<Respons
       body: JSON.stringify(payload),
     });
 
-    // === ERROR HANDLING INTERCEPTION ===
-    // If HF returns an error (e.g., 429, 503), it usually sends JSON, not a stream.
-    // We must catch this, format it, and return it as JSON so the frontend knows why it failed.
     if (!res.ok) {
       const rawText = await res.text();
       const formattedError = formatHfError(res.status, rawText);
       
       return new Response(JSON.stringify(formattedError), { 
-        status: res.status, // Pass the 429/503 status code specifically
+        status: res.status, 
         headers: { ...corsHeaders, "Content-Type": "application/json" } 
       });
     }
 
-    // If OK, pipe the stream
     const responseHeaders = new Headers(corsHeaders);
     responseHeaders.set("Content-Type", res.headers.get("Content-Type") || "text/event-stream");
     responseHeaders.set("Cache-Control", "no-cache");
@@ -200,27 +208,37 @@ async function handler(req: Request): Promise<Response> {
     return new Response(JSON.stringify(err), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
   }
 
+  // === MODEL SELECTION LOGIC ===
+  let targetModelId = MODELS[DEFAULT_MODEL]; // Fallback default
+  
+  if (normalized.model && MODELS[normalized.model]) {
+    targetModelId = MODELS[normalized.model];
+    console.log(`🔄 Switching to requested model: ${normalized.model} -> ${targetModelId}`);
+  } else if (normalized.model) {
+    console.warn(`⚠️ Requested model '${normalized.model}' not found. Using default: ${targetModelId}`);
+  }
+
   const chatPayload: any = {
-    model: MODEL_ID,
+    model: targetModelId, // Use the mapped ID
     messages: normalized.messages,
   };
   for (const k of ["max_tokens","temperature","top_p","n","stop","stream"]) if (k in normalized) chatPayload[k] = normalized[k];
 
   // --- STREAMING LOGIC ---
   if (chatPayload.stream === true) {
-    console.log(`➡️ Calling HF Router (STREAM) with model: ${MODEL_ID}`);
-    return await callRouterStream(CHAT_PATH, chatPayload);
+    console.log(`➡️ Calling HF Router (STREAM) with model: ${targetModelId}`);
+    return await callRouterStream(targetModelId, CHAT_PATH, chatPayload);
   }
 
   // --- NON-STREAMING LOGIC ---
-  console.log(`➡️ Calling HF Router (JSON) with model: ${MODEL_ID}`);
+  console.log(`➡️ Calling HF Router (JSON) with model: ${targetModelId}`);
   responseHeaders.set("Content-Type", "application/json");
 
-  const chatRes = await callRouterJson(CHAT_PATH, chatPayload);
+  const chatRes = await callRouterJson(targetModelId, CHAT_PATH, chatPayload);
 
   if (chatRes.ok) {
     const txt = extractText(chatRes.data);
-    return new Response(JSON.stringify({ response: txt ?? chatRes.data, modelUsed: MODEL_ID, endpoint: "chat", raw: chatRes.data }), { status: 200, headers: responseHeaders });
+    return new Response(JSON.stringify({ response: txt ?? chatRes.data, modelUsed: targetModelId, endpoint: "chat", raw: chatRes.data }), { status: 200, headers: responseHeaders });
   }
 
   // Fallback Logic for "Not a chat model"
@@ -229,25 +247,23 @@ async function handler(req: Request): Promise<Response> {
 
   if (isNotChat) {
     const prompt = messagesToPrompt(normalized.messages);
-    const compPayload: any = { model: MODEL_ID, prompt };
+    const compPayload: any = { model: targetModelId, prompt };
     if (normalized.max_tokens) compPayload.max_tokens = normalized.max_tokens;
     if (normalized.temperature) compPayload.temperature = normalized.temperature;
     
-    console.log(`➡️ Falling back to completions endpoint: ${MODEL_ID}`);
-    const compRes = await callRouterJson(COMPLETIONS_PATH, compPayload);
+    console.log(`➡️ Falling back to completions endpoint: ${targetModelId}`);
+    const compRes = await callRouterJson(targetModelId, COMPLETIONS_PATH, compPayload);
     
     if (compRes.ok) {
       const txt = extractText(compRes.data);
-      return new Response(JSON.stringify({ response: txt ?? compRes.data, modelUsed: MODEL_ID, endpoint: "completions", raw: compRes.data }), { status: 200, headers: responseHeaders });
+      return new Response(JSON.stringify({ response: txt ?? compRes.data, modelUsed: targetModelId, endpoint: "completions", raw: compRes.data }), { status: 200, headers: responseHeaders });
     }
     
-    // If fallback fails, return the formatted error from the fallback attempt
     return new Response(JSON.stringify(compRes.data), { status: compRes.status, headers: responseHeaders });
   }
 
-  // Return the formatted error from the first attempt
   return new Response(JSON.stringify(chatRes.data), { status: chatRes.status, headers: responseHeaders });
 }
 
-console.log("✅ Deno server starting — locked to model:", MODEL_ID);
+console.log("✅ Deno server starting — Models Loaded:", Object.keys(MODELS).join(", "));
 serve(handler);
