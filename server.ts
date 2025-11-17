@@ -1,5 +1,5 @@
-// server.ts — Deno HF proxy with improved error handling, streaming fallback, retries.
-// Usage: set env HF_API_KEY and optionally MODEL_ID
+// server.ts — Deno proxy locked to deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+// --- MODIFIED TO SUPPORT STREAMING AND BETTER ERROR HANDLING ---
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
 const HF_API_KEY = Deno.env.get("HF_API_KEY") ?? "";
@@ -8,327 +8,209 @@ if (!HF_API_KEY) {
   Deno.exit(1);
 }
 
-// Default locked model (can override with env MODEL_ID)
-const MODEL_ID = Deno.env.get("MODEL_ID") ?? "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
+// === SINGLE MODEL (locked) ===
+const MODEL_ID = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B";
 
-// Hugging Face router base
 const ROUTER_BASE = "https://router.huggingface.co/v1";
-const ROUTER_CHAT = "/chat/completions";
-const ROUTER_COMPLETIONS = "/completions";
+const CHAT_PATH = "/chat/completions";
+const COMPLETIONS_PATH = "/completions";
 
-const ALLOWED_ORIGINS = Deno.env.get("ALLOWED_ORIGINS") ?? "*";
+const corsHeaders = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "POST, OPTIONS, GET",
+  "access-control-allow-headers": "Content-Type, Authorization",
+};
 
-// Tunables
-const REQUEST_TIMEOUT_MS = Number(Deno.env.get("REQUEST_TIMEOUT_MS") ?? 25_000);
-const MAX_RETRIES = Number(Deno.env.get("MAX_RETRIES") ?? 2); // for retryable upstream errors
-const RETRY_BASE_MS = 800;
+function isString(x: any) { return typeof x === "string"; }
+function safeJsonParse(text: string) { try { return JSON.parse(text); } catch { return null; } }
 
-function corsHeaders() {
-  return {
-    "Access-Control-Allow-Origin": ALLOWED_ORIGINS,
-    "Access-Control-Allow-Credentials": "true",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  };
-}
-
-function now() {
-  return new Date().toISOString();
-}
-
-async function readBodyAsText(r: Request) {
-  try {
-    return await r.text();
-  } catch {
-    return null;
+function normalizeIncoming(body: any) {
+  const out: any = {};
+  if (Array.isArray(body.messages) && body.messages.length > 0) {
+    out.messages = body.messages.map((m: any) => ({ role: m.role ?? "user", content: isString(m.content) ? m.content : String(m.content ?? "") }));
+  } else if (body.input || body.inputs || body.prompt || body.message) {
+    const text = body.input ?? body.inputs ?? body.prompt ?? body.message;
+    out.messages = [{ role: "user", content: isString(text) ? text : String(text ?? "") }];
   }
+  const allowed = ["max_tokens", "temperature", "top_p", "n", "stop", "stream"];
+  for (const k of allowed) if (k in body) out[k] = body[k];
+  return out;
 }
 
-async function parseUpstreamErrorText(text: string | null) {
-  if (!text) return null;
-  try {
-    const j = JSON.parse(text);
-    // HF often returns { error: "..." } or structured object
-    if (j.error) return String(j.error);
-    // some endpoints return message
-    if (j.message) return String(j.message);
-    // last resort: stringify
-    return JSON.stringify(j);
-  } catch {
-    return text.slice(0, 200);
-  }
-}
-
-function makeErrorResponseObject(opts: {
-  message: string;
-  code?: string;
-  source?: string;
-  upstream_status?: number | null;
-  upstream_message?: string | null;
-  retryable?: boolean;
-}) {
-  return {
-    ok: false,
-    error: {
-      message: opts.message,
-      code: opts.code ?? "server_error",
-      source: opts.source ?? "proxy",
-      upstream_status: opts.upstream_status ?? null,
-      upstream_message: opts.upstream_message ?? null,
-      retryable: !!opts.retryable,
-      timestamp: now(),
-    },
-  };
-}
-
-// small backoff
-function sleep(ms: number) {
-  return new Promise((res) => setTimeout(res, ms));
-}
-
-async function callUpstream(path: string, body: any, stream: boolean, abortSignal?: AbortSignal) {
-  const url = `${ROUTER_BASE}${path.replace(/^\/+/,'')}`;
-  const headers: Record<string,string> = {
-    "Authorization": `Bearer ${HF_API_KEY}`,
-    "Accept": stream ? "text/event-stream, application/json" : "application/json",
-    "Content-Type": "application/json",
-    "User-Agent": "deno-hf-proxy/1.0",
-  };
-
-  const payload = { model: MODEL_ID, ...body };
+// --- NON-STREAMING HELPER ---
+async function callRouterJson(path: string, payload: unknown, timeoutMs = 60_000) {
+  const url = `${ROUTER_BASE}${path}`;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  // If caller provided an AbortSignal, forward aborts
-  if (abortSignal) {
-    abortSignal.addEventListener("abort", () => controller.abort());
-  }
-
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers,
+      headers: {
+        "Authorization": `Bearer ${HF_API_KEY}`,
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+      },
       body: JSON.stringify(payload),
-      signal: controller.signal,
+      signal: controller.signal
     });
-    clearTimeout(timeout);
-    return res;
-  } catch (err) {
-    clearTimeout(timeout);
-    throw err;
+    clearTimeout(timer);
+    const text = await res.text();
+    const data = safeJsonParse(text) ?? text;
+    return { ok: res.ok, status: res.status, statusText: res.statusText, data };
+  } catch (err: any) {
+    clearTimeout(timer);
+    return { ok: false, status: 500, statusText: err?.name ?? "Error", data: { error: err?.message ?? String(err) } };
   }
 }
 
-/**
- * Handler: expects POST with JSON body. Example:
- * { "messages": [...], "stream": true } OR { "inputs": "hello", "stream": false }
- */
-async function handler(req: Request): Promise<Response> {
-  // CORS preflight
-  if (req.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders() });
-  }
-
-  if (req.method !== "POST") {
-    return new Response(JSON.stringify(makeErrorResponseObject({ message: "Method not allowed", code: "method_not_allowed" })), {
-      status: 405,
-      headers: { ...corsHeaders(), "Content-Type": "application/json" },
-    });
-  }
-
-  const rawBody = await readBodyAsText(req);
-  let clientJson: any = null;
+// --- NEW STREAMING HELPER WITH ERROR HANDLING ---
+async function callRouterStream(path: string, payload: unknown): Promise<Response> {
+  const url = `${ROUTER_BASE}${path}`;
   try {
-    clientJson = rawBody ? JSON.parse(rawBody) : {};
-  } catch (err) {
-    console.error("[handler] invalid JSON body:", rawBody?.slice(0, 500));
-    return new Response(JSON.stringify(makeErrorResponseObject({ message: "Invalid JSON body", code: "invalid_json" })), {
-      status: 400,
-      headers: { ...corsHeaders(), "Content-Type": "application/json" },
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${HF_API_KEY}`,
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream"
+      },
+      body: JSON.stringify(payload),
+    });
+
+    // === ERROR HANDLING IMPROVEMENT ===
+    // Agar status OK nahi hai (e.g., 429, 503, 400), toh stream pipe mat karo.
+    // Error message ko parse karo aur JSON return karo.
+    if (!res.ok) {
+      const errorText = await res.text();
+      let errorJson: any = { error: `HF Error ${res.status}: ${res.statusText}` };
+      
+      try {
+        const parsed = JSON.parse(errorText);
+        // HF errors aksar { error: "message" } ya { error: { message: "..." } } hote hain
+        if (parsed.error) {
+             errorJson = { error: typeof parsed.error === 'string' ? parsed.error : (parsed.error.message || JSON.stringify(parsed.error)) };
+        } else if (parsed.message) {
+             errorJson = { error: parsed.message };
+        }
+      } catch (e) {
+        // Agar JSON parse fail ho, toh raw text use karo
+        if (errorText.length > 0) errorJson = { error: `HF Error: ${errorText}` };
+      }
+
+      console.error(`❌ HF Stream Error (${res.status}):`, JSON.stringify(errorJson));
+
+      // JSON Response return karo taaki frontend/PHP ise pakad sake
+      return new Response(JSON.stringify(errorJson), {
+        status: res.status, // Original status code pass karo (e.g. 429, 503)
+        headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
+    // === END ERROR HANDLING ===
+
+    // Agar sab sahi hai, toh stream pipe karo
+    const responseHeaders = new Headers(corsHeaders);
+    responseHeaders.set("Content-Type", res.headers.get("Content-Type") || "text/event-stream");
+    responseHeaders.set("Cache-Control", "no-cache");
+    
+    return new Response(res.body, {
+      status: res.status,
+      headers: responseHeaders
+    });
+
+  } catch (err: any) {
+    return new Response(JSON.stringify({ error: err?.message ?? String(err) }), { 
+      status: 500, 
+      headers: { ...corsHeaders, "Content-Type": "application/json" } 
     });
   }
-
-  const wantsStream = !!clientJson.stream;
-  // Decide which HF path to call:
-  const useChat = Array.isArray(clientJson.messages);
-  const path = useChat ? ROUTER_CHAT : ROUTER_COMPLETIONS;
-
-  // We attach a small provenance field so upstream logs can be matched
-  const upstreamBody = { ...(clientJson || {}) };
-
-  // Try with retries for transient upstream statuses
-  let attempt = 0;
-  while (true) {
-    attempt++;
-    let res: Response | null = null;
-    try {
-      res = await callUpstream(path, upstreamBody, wantsStream);
-    } catch (err: any) {
-      // Network / fetch error
-      const msg = String(err?.message ?? err);
-      console.warn(`[proxy] network error on attempt ${attempt}:`, msg);
-      // If it's aborted due to timeout, provide specific message
-      if (attempt <= MAX_RETRIES && (msg.includes("timed out") || msg.includes("aborted") || msg.includes("network"))) {
-        const backoff = RETRY_BASE_MS * Math.pow(2, attempt - 1);
-        console.log(`[proxy] retrying after ${backoff}ms (attempt ${attempt}/${MAX_RETRIES})`);
-        await sleep(backoff);
-        continue;
-      }
-      const body = makeErrorResponseObject({
-        message: "Upstream network error or timeout when contacting Hugging Face.",
-        code: "upstream_network_error",
-        source: "network",
-        upstream_message: msg,
-        retryable: attempt <= MAX_RETRIES,
-      });
-      return new Response(JSON.stringify(body), { status: 502, headers: { ...corsHeaders(), "Content-Type": "application/json" } });
-    }
-
-    // If we have a response object:
-    const upstreamStatus = res.status;
-    const upstreamContentType = res.headers.get("Content-Type") ?? "";
-
-    // Success streaming: 200 and a body stream; forward as-is (but check for empty).
-    if (upstreamStatus === 200 && wantsStream) {
-      if (!res.body) {
-        const body = makeErrorResponseObject({
-          message: "Upstream returned no stream body. Possible hosting or upstream blocking.",
-          code: "empty_stream",
-          source: "upstream",
-          upstream_status: upstreamStatus,
-          upstream_message: await parseUpstreamErrorText(await res.text()),
-        });
-        return new Response(JSON.stringify(body), { status: 502, headers: { ...corsHeaders(), "Content-Type": "application/json" } });
-      }
-
-      // Forward response headers, prefer upstream Content-Type (likely text/event-stream)
-      const headers = new Headers(corsHeaders());
-      if (upstreamContentType) headers.set("Content-Type", upstreamContentType);
-      headers.set("Cache-Control", "no-cache");
-      // Pass-through response body (stream piping)
-      console.log(`[proxy] streaming proxied (200) to client. model=${MODEL_ID}`);
-      return new Response(res.body, { status: 200, headers });
-    }
-
-    // Success non-stream (or client requested non-stream): return full JSON body
-    if (upstreamStatus === 200) {
-      // clone/res.text() available
-      let text = "";
-      try {
-        text = await res.text();
-      } catch (err) {
-        console.error("[proxy] failed reading upstream body:", String(err));
-        return new Response(JSON.stringify(makeErrorResponseObject({ message: "Failed to read upstream response", code: "read_error" })), {
-          status: 502,
-          headers: { ...corsHeaders(), "Content-Type": "application/json" },
-        });
-      }
-      // If upstream returned empty body
-      if (!text) {
-        return new Response(JSON.stringify(makeErrorResponseObject({
-          message: "Upstream returned an empty response body.",
-          code: "empty_response",
-          source: "upstream",
-          upstream_status: upstreamStatus,
-        })), { status: 502, headers: { ...corsHeaders(), "Content-Type": "application/json" } });
-      }
-      // Return what upstream returned (json or text)
-      const headers = { ...corsHeaders(), "Content-Type": "application/json" };
-      return new Response(text, { status: 200, headers });
-    }
-
-    // Handle common upstream failure statuses with clear messaging and retry logic
-    const rawUpstreamText = await (async () => {
-      try {
-        return await res.text();
-      } catch {
-        return null;
-      }
-    })();
-    const upstreamMessage = await parseUpstreamErrorText(rawUpstreamText);
-
-    // 401/403/402 -> auth/payment error
-    if ([401, 403, 402].includes(upstreamStatus)) {
-      const body = makeErrorResponseObject({
-        message: upstreamStatus === 401 ? "Authentication to Hugging Face failed (invalid or expired HF_API_KEY)." :
-                 upstreamStatus === 402 ? "Payment required on Hugging Face account (usage or billing problem)." :
-                 "Permission denied by Hugging Face (model access restricted).",
-        code: upstreamStatus === 401 ? "auth_failed" : upstreamStatus === 402 ? "payment_required" : "forbidden",
-        source: "huggingface",
-        upstream_status: upstreamStatus,
-        upstream_message: upstreamMessage,
-        retryable: false,
-      });
-      console.error(`[proxy] upstream auth/permission error: ${upstreamStatus} ${upstreamMessage}`);
-      return new Response(JSON.stringify(body), { status: 502, headers: { ...corsHeaders(), "Content-Type": "application/json" } });
-    }
-
-    // 404 -> model not found or invalid path
-    if (upstreamStatus === 404) {
-      const body = makeErrorResponseObject({
-        message: "Upstream model or endpoint not found. Confirm MODEL_ID and that the model is available on Hugging Face.",
-        code: "model_not_found",
-        source: "huggingface",
-        upstream_status: upstreamStatus,
-        upstream_message: upstreamMessage,
-        retryable: false,
-      });
-      console.warn(`[proxy] model not found: ${upstreamMessage}`);
-      return new Response(JSON.stringify(body), { status: 502, headers: { ...corsHeaders(), "Content-Type": "application/json" } });
-    }
-
-    // 429 -> rate limit; retry with backoff if attempts left
-    if (upstreamStatus === 429) {
-      console.warn(`[proxy] upstream rate-limited (429). attempt=${attempt}`);
-      if (attempt <= MAX_RETRIES) {
-        const backoff = RETRY_BASE_MS * Math.pow(2, attempt - 1);
-        await sleep(backoff);
-        continue; // retry
-      }
-      const body = makeErrorResponseObject({
-        message: "Upstream rate-limited by Hugging Face. Try again later or reduce request rate.",
-        code: "rate_limited",
-        source: "huggingface",
-        upstream_status: upstreamStatus,
-        upstream_message: upstreamMessage,
-        retryable: true,
-      });
-      return new Response(JSON.stringify(body), { status: 429, headers: { ...corsHeaders(), "Content-Type": "application/json" } });
-    }
-
-    // 502/503/504 -> upstream overloaded / gateway errors -> retry a few times then return error
-    if ([502, 503, 504].includes(upstreamStatus)) {
-      console.warn(`[proxy] upstream temporary error ${upstreamStatus}. attempt=${attempt}`);
-      if (attempt <= MAX_RETRIES) {
-        const backoff = RETRY_BASE_MS * Math.pow(2, attempt - 1);
-        await sleep(backoff);
-        continue;
-      }
-      const body = makeErrorResponseObject({
-        message: "Upstream service appears overloaded or temporarily unavailable.",
-        code: "upstream_unavailable",
-        source: "huggingface",
-        upstream_status: upstreamStatus,
-        upstream_message: upstreamMessage,
-        retryable: true,
-      });
-      return new Response(JSON.stringify(body), { status: 502, headers: { ...corsHeaders(), "Content-Type": "application/json" } });
-    }
-
-    // Other 4xx/5xx -> bubble up HF message
-    {
-      const body = makeErrorResponseObject({
-        message: `Hugging Face returned an error (${upstreamStatus}). See upstream_message for details.`,
-        code: "upstream_error",
-        source: "huggingface",
-        upstream_status: upstreamStatus,
-        upstream_message: upstreamMessage,
-        retryable: [500, 501].includes(upstreamStatus),
-      });
-      console.error(`[proxy] upstream returned status ${upstreamStatus}: ${upstreamMessage}`);
-      return new Response(JSON.stringify(body), { status: 502, headers: { ...corsHeaders(), "Content-Type": "application/json" } });
-    }
-  } // end retry loop
 }
 
-console.log("✅ Deno HF-proxy starting. Model locked to:", MODEL_ID);
+function messagesToPrompt(messages: Array<{role:string,content:string}>) {
+  return messages.map(m => {
+    const role = (m.role || "user").toLowerCase();
+    if (role === "system") return `System: ${m.content}`;
+    if (role === "assistant") return `Assistant: ${m.content}`;
+    return `User: ${m.content}`;
+  }).join("\n\n");
+}
+
+function extractText(data: any): string | null {
+  try {
+    if (data && Array.isArray(data.choices) && data.choices.length > 0) {
+      const c = data.choices[0];
+      if (c?.message?.content && isString(c.message.content)) return c.message.content;
+      if (c?.text && isString(c.text)) return c.text;
+    }
+    if (data?.generated_text && isString(data.generated_text)) return data.generated_text;
+    if (data?.output_text && isString(data.output_text)) return data.output_text;
+    if (isString(data)) return data;
+  } catch (e) {}
+  return null;
+}
+
+async function handler(req: Request): Promise<Response> {
+  const responseHeaders = new Headers(corsHeaders);
+
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
+  if (req.method !== "POST") {
+    responseHeaders.set("Content-Type", "application/json");
+    return new Response(JSON.stringify({ error: "Use POST" }), { status: 405, headers: responseHeaders });
+  }
+
+  let body: any = {};
+  try { body = await req.json(); } catch { /* ignore */ }
+
+  const normalized = normalizeIncoming(body);
+  if (!Array.isArray(normalized.messages) || normalized.messages.length === 0) {
+    responseHeaders.set("Content-Type", "application/json");
+    return new Response(JSON.stringify({ error: "Missing 'messages' or 'input' in request body." }), { status: 400, headers: responseHeaders });
+  }
+
+  // Use Chat Payload
+  const chatPayload: any = {
+    model: MODEL_ID,
+    messages: normalized.messages,
+  };
+  for (const k of ["max_tokens","temperature","top_p","n","stop","stream"]) if (k in normalized) chatPayload[k] = normalized[k];
+
+  // --- STREAMING LOGIC ---
+  if (chatPayload.stream === true) {
+    console.log(`➡️ Calling HF Router (STREAM) with model: ${MODEL_ID} messages:${normalized.messages.length}`);
+    return await callRouterStream(CHAT_PATH, chatPayload);
+  }
+
+  // --- NON-STREAMING LOGIC ---
+  console.log(`➡️ Calling HF Router (JSON) with model: ${MODEL_ID} messages:${normalized.messages.length}`);
+  responseHeaders.set("Content-Type", "application/json"); 
+
+  const chatRes = await callRouterJson(CHAT_PATH, chatPayload);
+
+  if (chatRes.ok) {
+    const txt = extractText(chatRes.data);
+    return new Response(JSON.stringify({ response: txt ?? chatRes.data, modelUsed: MODEL_ID, endpoint: "chat", raw: chatRes.data }), { status: 200, headers: responseHeaders });
+  }
+
+  const errMsg = (chatRes.data?.error?.message ?? chatRes.data?.message ?? "").toString().toLowerCase();
+  const errCode = chatRes.data?.error?.code ?? chatRes.data?.code ?? null;
+  const isNotChat = chatRes.status === 400 && (errMsg.includes("not a chat model") || errCode === "model_not_supported");
+
+  if (isNotChat) {
+    const prompt = messagesToPrompt(normalized.messages);
+    const compPayload: any = { model: MODEL_ID, prompt };
+    if (normalized.max_tokens) compPayload.max_tokens = normalized.max_tokens;
+    if (normalized.temperature) compPayload.temperature = normalized.temperature;
+    console.log(`➡️ Falling back to completions endpoint: ${MODEL_ID}`);
+    const compRes = await callRouterJson(COMPLETIONS_PATH, compPayload);
+    if (compRes.ok) {
+      const txt = extractText(compRes.data);
+      return new Response(JSON.stringify({ response: txt ?? compRes.data, modelUsed: MODEL_ID, endpoint: "completions", raw: compRes.data }), { status: 200, headers: responseHeaders });
+    }
+    return new Response(JSON.stringify({ error: `Upstream HF completions error (status ${compRes.status})`, details: compRes.data }), { status: 502, headers: responseHeaders });
+  }
+
+  // Return specific HF error
+  return new Response(JSON.stringify({ error: `Upstream HF error: ${chatRes.data?.error || JSON.stringify(chatRes.data)}` }), { status: chatRes.status || 502, headers: responseHeaders });
+}
+
+console.log("✅ Deno server starting — locked to model:", MODEL_ID);
 serve(handler);
