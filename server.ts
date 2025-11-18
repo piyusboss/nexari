@@ -13,9 +13,9 @@ const MODELS: Record<string, string> = {
   // Default / Fast Model
   "DeepSeek-R1": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
   
-  // Premium / High-Intelligence Model (Nexari G1)
+  // Premium / High-Intelligence Model (Nexari G1 renamed to Qwen2.5-72B)
   // Selected: Qwen 2.5 72B Instruct - SOTA performance for open weights
-  "Nexari G1": "Qwen/Qwen2.5-72B-Instruct", 
+  "Qwen2.5-72B": "Qwen/Qwen2.5-72B-Instruct", 
 };
 
 const DEFAULT_MODEL = "DeepSeek-R1";
