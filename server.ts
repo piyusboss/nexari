@@ -1,4 +1,4 @@
-// server.ts — Fixed Routing for Custom Models
+// server.ts — Fixed for Custom Models (Raw Mode)
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
 
@@ -19,14 +19,13 @@ const MODELS: Record<string, string> = {
 
 const DEFAULT_MODEL = "Nexari-G1";
 
-// Allow CORS
 const corsHeaders = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "POST, OPTIONS, GET",
   "access-control-allow-headers": "Content-Type, Authorization, X-Nexari-Token",
 };
 
-// --- AUTH HELPER (Unchanged) ---
+// --- HELPER: Verify Token ---
 function verifyToken(authHeader: string | null): boolean {
   if (!authHeader) return false;
   try {
@@ -42,19 +41,17 @@ function verifyToken(authHeader: string | null): boolean {
   } catch (e) { return false; }
 }
 
-// --- ERROR FORMATTING (Unchanged) ---
+// --- HELPER: Format Errors ---
 function formatHfError(status: number, rawBody: string) {
   let code = "UNKNOWN_ERROR";
-  let message = "An unexpected error occurred.";
+  let message = `Server Error (${status})`;
   try {
       const jsonBody = JSON.parse(rawBody);
-      // Hugging Face specific errors often come as { error: "Model loading..." }
       const hfErrorMsg = jsonBody?.error?.message || jsonBody?.error || rawBody;
       
       if (status === 503) { code = "MODEL_LOADING"; message = "Nexari is waking up. Please try again in 30s."; }
-      else if (status === 429) { code = "HEAVY_TRAFFIC"; message = "Too many requests. Please wait."; }
-      else if (status === 400) { code = "INVALID_REQUEST"; message = "Request format issue."; }
-      else if (status === 401) { code = "AUTH_ERROR"; message = "HF Token Issue."; }
+      else if (status === 429) { code = "HEAVY_TRAFFIC"; message = "Traffic high. Please wait 1 min."; }
+      else if (status === 500) { code = "INTERNAL_ERROR"; message = "Hugging Face Internal Error."; }
       
       return { error: { code, message, details: hfErrorMsg } };
   } catch {
@@ -62,55 +59,63 @@ function formatHfError(status: number, rawBody: string) {
   }
 }
 
-// --- UPDATED API CALLS (DIRECT MODEL ROUTING) ---
-
-async function callRouterStream(modelId: string, payload: unknown): Promise<Response> {
-  // FIX: Pointing directly to the model's OpenAI-compatible endpoint
-  const url = `https://api-inference.huggingface.co/models/${modelId}/v1/chat/completions`;
-  
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${HF_API_KEY}`,
-        "Content-Type": "application/json",
-        "Accept": "text/event-stream"
-      },
-      body: JSON.stringify(payload),
-    });
-
-    if (!res.ok) {
-      const rawText = await res.text();
-      const formatted = formatHfError(res.status, rawText);
-      return new Response(JSON.stringify(formatted), { status: res.status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-    }
-
-    const responseHeaders = new Headers(corsHeaders);
-    responseHeaders.set("Content-Type", "text/event-stream");
-    responseHeaders.set("Cache-Control", "no-cache");
+// --- HELPER: Manual Llama 3 Prompting ---
+// Custom models ke liye hum khud prompt banayenge taaki HF crash na ho
+function generateLlama3Prompt(messages: any[]) {
+    let prompt = "<|begin_of_text|>";
     
-    return new Response(res.body, { status: res.status, headers: responseHeaders });
-  } catch (err: any) {
-     return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: corsHeaders });
-  }
+    // System Prompt (Hidden)
+    prompt += `<|start_header_id|>system<|end_header_id|>\n\nYou are Nexari, an intelligent AI assistant developed by Piyush. You are NOT Llama 3. Answer clearly.<|eot_id|>`;
+    
+    // User/Assistant History
+    messages.forEach(msg => {
+        prompt += `<|start_header_id|>${msg.role}<|end_header_id|>\n\n${msg.content}<|eot_id|>`;
+    });
+    
+    // Assistant trigger
+    prompt += `<|start_header_id|>assistant<|end_header_id|>\n\n`;
+    return prompt;
 }
 
-async function callRouterJson(modelId: string, payload: unknown) {
-    // FIX: Using direct endpoint here too
-    const url = `https://api-inference.huggingface.co/models/${modelId}/v1/chat/completions`;
-    
-    try {
-        const res = await fetch(url, {
-            method: "POST",
-            headers: { "Authorization": `Bearer ${HF_API_KEY}`, "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-        });
-        const text = await res.text();
-        if (!res.ok) return { ok: false, status: res.status, data: formatHfError(res.status, text) };
-        return { ok: true, status: res.status, data: JSON.parse(text) };
-    } catch (err: any) {
-        return { ok: false, status: 500, data: { error: err.message } };
-    }
+// --- API CALLS ---
+
+// 1. Standard Call (For DeepSeek/Qwen) - Uses OpenAI format
+async function callChatEndpoint(modelId: string, payload: any) {
+  const url = `https://api-inference.huggingface.co/models/${modelId}/v1/chat/completions`;
+  const res = await fetch(url, {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${HF_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+  });
+  if (!res.ok) { const txt = await res.text(); return { ok: false, status: res.status, data: formatHfError(res.status, txt) }; }
+  return { ok: true, body: res.body }; // Returns stream
+}
+
+// 2. Raw Call (For Nexari) - Uses Manual Prompting
+async function callRawEndpoint(modelId: string, messages: any[], params: any) {
+  const url = `https://api-inference.huggingface.co/models/${modelId}`;
+  
+  // Manual Prompt Construction
+  const prompt = generateLlama3Prompt(messages);
+  
+  const payload = {
+      inputs: prompt,
+      parameters: {
+          max_new_tokens: params.max_tokens || 512,
+          temperature: params.temperature || 0.7,
+          return_full_text: false,
+          stream: true // Always stream
+      }
+  };
+
+  const res = await fetch(url, {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${HF_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+  });
+
+  if (!res.ok) { const txt = await res.text(); return { ok: false, status: res.status, data: formatHfError(res.status, txt) }; }
+  return { ok: true, body: res.body };
 }
 
 // --- MAIN HANDLER ---
@@ -129,32 +134,38 @@ async function handler(req: Request): Promise<Response> {
   let body: any = {};
   try { body = await req.json(); } catch { return new Response("Invalid JSON", { status: 400, headers: corsHeaders }); }
 
-  // Default Model Logic
   let targetModelId = MODELS[DEFAULT_MODEL];
   if (body.model && MODELS[body.model]) targetModelId = MODELS[body.model];
 
-  // Prepare Payload
   let messages = body.messages;
-  if (!messages && (body.input || body.prompt)) {
-      messages = [{ role: "user", content: body.input || body.prompt }];
-  }
+  if (!messages && (body.input || body.prompt)) messages = [{ role: "user", content: body.input || body.prompt }];
 
-  const chatPayload: any = { 
-      model: targetModelId, 
-      messages: messages,
-      max_tokens: body.max_tokens || 512,
-      temperature: body.temperature || 0.7,
-      stream: body.stream ?? false
-  };
-
-  // Call HF
-  if (chatPayload.stream === true) {
-    return await callRouterStream(targetModelId, chatPayload);
+  // === LOGIC SWITCH ===
+  // Agar Nexari hai toh Raw Endpoint use karo, baaki ke liye Standard Chat Endpoint
+  let result;
+  if (targetModelId.includes("Nexari")) {
+      result = await callRawEndpoint(targetModelId, messages, body);
   } else {
-    const res = await callRouterJson(targetModelId, chatPayload);
-    return new Response(JSON.stringify(res.data), { status: res.status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      result = await callChatEndpoint(targetModelId, {
+          model: targetModelId,
+          messages: messages,
+          max_tokens: body.max_tokens || 512,
+          temperature: body.temperature || 0.7,
+          stream: true
+      });
   }
+
+  if (!result.ok) {
+      return new Response(JSON.stringify(result.data), { status: result.status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+  }
+
+  // Stream Response Forwarding
+  const headers = new Headers(corsHeaders);
+  headers.set("Content-Type", "text/event-stream");
+  headers.set("Cache-Control", "no-cache");
+  
+  return new Response(result.body, { status: 200, headers });
 }
 
-console.log("✅ Fixed Routing Server Running...");
+console.log("✅ Hybrid Routing Server Running...");
 serve(handler);
