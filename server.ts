@@ -10,12 +10,15 @@ if (!HF_API_KEY) {
   Deno.exit(1);
 }
 
+// === YAHAN MODEL MAPPING UPDATE KI HAI ===
 const MODELS: Record<string, string> = {
+  "Nexari-G1": "Piyush-boss/Nexari-G1-3-8B", // <--- NEW MODEL ADDED
   "DeepSeek-R1": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
   "Qwen2.5-72B": "Qwen/Qwen2.5-72B-Instruct", 
 };
 
-const DEFAULT_MODEL = "DeepSeek-R1";
+// Default model optionally update kar sakte hain
+const DEFAULT_MODEL = "Nexari-G1"; 
 const ROUTER_BASE = "https://router.huggingface.co/v1";
 const CHAT_PATH = "/chat/completions";
 const COMPLETIONS_PATH = "/completions";
@@ -148,8 +151,15 @@ async function handler(req: Request): Promise<Response> {
       messages = [{ role: "user", content: body.input || body.prompt }];
   }
   
+  // === LOGIC UPDATE FOR MODEL SELECTION ===
   let targetModelId = MODELS[DEFAULT_MODEL];
-  if (body.model && MODELS[body.model]) targetModelId = MODELS[body.model];
+  
+  // Frontend se 'Nexari-G1' aayega, ye usse 'Piyush-boss/Nexari-G1-3-8B' mein convert karega
+  if (body.model && MODELS[body.model]) {
+      targetModelId = MODELS[body.model];
+  } else {
+      console.warn(`Model ${body.model} not found, using default.`);
+  }
 
   const chatPayload: any = { model: targetModelId, messages: messages };
   for (const k of ["max_tokens","temperature","top_p","stream"]) if (k in body) chatPayload[k] = body[k];
