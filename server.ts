@@ -12,7 +12,7 @@ if (!HF_API_KEY) {
 
 // === YAHAN MODEL MAPPING UPDATE KI HAI ===
 const MODELS: Record<string, string> = {
-  "Nexari-G1": "Piyush-boss/Nexari-Qwen-3B-LoRA", // <--- NEW MODEL ADDED
+  "Nexari-G1": "Piyush-boss/Nexari-Qwen-3B-Full", // <--- NEW MODEL ADDED
   "DeepSeek-R1": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
   "Qwen2.5-72B": "Qwen/Qwen2.5-72B-Instruct", 
 };
