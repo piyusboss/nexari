@@ -1,4 +1,4 @@
-// server.ts — Hybrid Fix (Standard for Public, Raw for Custom)
+// server.ts — Updated for New Hugging Face Router (2025 Standard)
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
 
@@ -10,10 +10,11 @@ if (!HF_API_KEY) {
   Deno.exit(1);
 }
 
+// === MODELS ===
 const MODELS: Record<string, string> = {
-  "Nexari-G1": "Piyush-boss/Nexari-Qwen-3B-Full", // Custom Model
-  "DeepSeek-R1": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", // Official
-  "Qwen-7B": "Qwen/Qwen2.5-7B-Instruct", // Official
+  "Nexari-G1": "Piyush-boss/Nexari-Qwen-3B-LoRA", 
+  "DeepSeek-R1": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+  "Qwen-7B": "Qwen/Qwen2.5-7B-Instruct", 
 };
 
 const DEFAULT_MODEL = "Nexari-G1";
@@ -24,7 +25,7 @@ const corsHeaders = {
   "access-control-allow-headers": "Content-Type, Authorization, X-Nexari-Token",
 };
 
-// --- AUTH ---
+// --- AUTHENTICATION ---
 function verifyToken(authHeader: string | null): boolean {
   if (!authHeader) return false;
   try {
@@ -46,14 +47,16 @@ function formatHfError(status: number, rawBody: string) {
       const json = JSON.parse(rawBody);
       message = json.error?.message || json.error || message;
       if (status === 503) message = "Model loading (Cold Start)... Wait 30s.";
-      if (status === 400) message = "Invalid Request Format.";
+      if (status === 404) message = "Model endpoint not found (Check URL).";
   } catch {}
   return { error: { message } };
 }
 
-// --- METHOD 1: Standard OpenAI Style (For DeepSeek/Official Qwen) ---
+// --- METHOD 1: Standard Chat API (Updated URL) ---
 async function callStandardAPI(modelId: string, messages: any[], params: any) {
-  const url = `https://api-inference.huggingface.co/models/${modelId}/v1/chat/completions`;
+  // ✅ NEW URL: router.huggingface.co
+  const url = `https://router.huggingface.co/models/${modelId}/v1/chat/completions`;
+  
   const payload = {
     model: modelId,
     messages: messages,
@@ -62,29 +65,32 @@ async function callStandardAPI(modelId: string, messages: any[], params: any) {
     stream: true
   };
 
-  const res = await fetch(url, {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${HF_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-  });
+  try {
+    const res = await fetch(url, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${HF_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+    });
 
-  if (!res.ok) {
-      const txt = await res.text();
-      return { ok: false, status: res.status, data: formatHfError(res.status, txt) };
+    if (!res.ok) {
+        const txt = await res.text();
+        return { ok: false, status: res.status, data: formatHfError(res.status, txt) };
+    }
+    return { ok: true, body: res.body };
+  } catch (err: any) {
+    return { ok: false, status: 500, data: { error: { message: err.message } } };
   }
-  return { ok: true, body: res.body };
 }
 
-// --- METHOD 2: Raw Manual Prompting (For Custom Nexari) ---
+// --- METHOD 2: Raw API (Updated URL for Custom Models) ---
 async function callRawAPI(modelId: string, messages: any[], params: any) {
-  // Direct Model URL (Bypasses strict validation)
-  const url = `https://api-inference.huggingface.co/models/${modelId}`;
+  // ✅ NEW URL: router.huggingface.co (Raw Inference)
+  const url = `https://router.huggingface.co/models/${modelId}`;
   
-  // Manually build ChatML Prompt (Qwen Format)
-  // <|im_start|>system...<|im_end|><|im_start|>user...
+  // Manual Prompting for Qwen (ChatML)
   let prompt = "";
   
-  // Inject System Prompt if missing
+  // System Prompt injection
   const hasSystem = messages.some((m: any) => m.role === "system");
   if (!hasSystem) {
       prompt += `<|im_start|>system\nYou are Nexari, an intelligent AI assistant developed by Piyush. Answer clearly.<|im_end|>\n`;
@@ -100,22 +106,26 @@ async function callRawAPI(modelId: string, messages: any[], params: any) {
     parameters: {
       max_new_tokens: 512,
       temperature: 0.7,
-      return_full_text: false, // Sirf naya jawab chahiye
+      return_full_text: false,
       stream: true 
     }
   };
 
-  const res = await fetch(url, {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${HF_API_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-  });
+  try {
+    const res = await fetch(url, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${HF_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+    });
 
-  if (!res.ok) {
-      const txt = await res.text();
-      return { ok: false, status: res.status, data: formatHfError(res.status, txt) };
+    if (!res.ok) {
+        const txt = await res.text();
+        return { ok: false, status: res.status, data: formatHfError(res.status, txt) };
+    }
+    return { ok: true, body: res.body };
+  } catch (err: any) {
+    return { ok: false, status: 500, data: { error: { message: err.message } } };
   }
-  return { ok: true, body: res.body };
 }
 
 // --- MAIN HANDLER ---
@@ -133,13 +143,13 @@ async function handler(req: Request): Promise<Response> {
 
   let messages = body.messages || [{ role: "user", content: body.input || "Hi" }];
 
-  // === HYBRID SWITCHING ===
+  // === ROUTING LOGIC ===
   let result;
   if (targetModelId.includes("Nexari")) {
-      // Nexari ke liye Raw Method use karo (Fixes Invalid Request)
+      // Nexari ke liye Raw Router URL
       result = await callRawAPI(targetModelId, messages, body);
   } else {
-      // Baaki sab ke liye Standard Method
+      // DeepSeek/Qwen ke liye Standard Router URL
       result = await callStandardAPI(targetModelId, messages, body);
   }
 
@@ -154,5 +164,5 @@ async function handler(req: Request): Promise<Response> {
   return new Response(result.body, { status: 200, headers });
 }
 
-console.log("✅ Hybrid Server Running...");
+console.log("✅ New Router (router.huggingface.co) Server Running...");
 serve(handler);
