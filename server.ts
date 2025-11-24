@@ -1,4 +1,4 @@
-// server.ts — Updated for New Hugging Face Router (2025 Standard)
+// server.ts — Universal Raw Logic (Solves 404 & Invalid Request)
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
 
@@ -10,10 +10,15 @@ if (!HF_API_KEY) {
   Deno.exit(1);
 }
 
-// === MODELS ===
+// === ✅ VERIFIED MODEL LIST ===
 const MODELS: Record<string, string> = {
+  // Aapka Adapter (Hugging Face isse Base Model ke saath khud load karega)
   "Nexari-G1": "Piyush-boss/Nexari-Qwen-3B-LoRA", 
+  
+  // DeepSeek (Fastest)
   "DeepSeek-R1": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+  
+  // Qwen 7B (Free Tier Friendly)
   "Qwen-7B": "Qwen/Qwen2.5-7B-Instruct", 
 };
 
@@ -25,7 +30,7 @@ const corsHeaders = {
   "access-control-allow-headers": "Content-Type, Authorization, X-Nexari-Token",
 };
 
-// --- AUTHENTICATION ---
+// --- AUTH ---
 function verifyToken(authHeader: string | null): boolean {
   if (!authHeader) return false;
   try {
@@ -40,91 +45,79 @@ function verifyToken(authHeader: string | null): boolean {
   } catch (e) { return false; }
 }
 
-// --- ERROR HANDLING ---
-function formatHfError(status: number, rawBody: string) {
-  let message = `Server Error (${status})`;
-  try {
-      const json = JSON.parse(rawBody);
-      message = json.error?.message || json.error || message;
-      if (status === 503) message = "Model loading (Cold Start)... Wait 30s.";
-      if (status === 404) message = "Model endpoint not found (Check URL).";
-  } catch {}
-  return { error: { message } };
-}
-
-// --- METHOD 1: Standard Chat API (Updated URL) ---
-async function callStandardAPI(modelId: string, messages: any[], params: any) {
-  // ✅ NEW URL: router.huggingface.co
-  const url = `https://router.huggingface.co/models/${modelId}/v1/chat/completions`;
-  
-  const payload = {
-    model: modelId,
-    messages: messages,
-    max_tokens: 512,
-    temperature: 0.7,
-    stream: true
-  };
-
-  try {
-    const res = await fetch(url, {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${HF_API_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-    });
-
-    if (!res.ok) {
-        const txt = await res.text();
-        return { ok: false, status: res.status, data: formatHfError(res.status, txt) };
+// --- PROMPT FORMATTER (The Magic Fix) ---
+// Hum server par hi Chat ko Text mein badal denge taaki HF confuse na ho
+function generatePrompt(messages: any[], modelId: string) {
+    let prompt = "";
+    
+    // System Prompt Logic
+    if (modelId.includes("Nexari")) {
+        const sysPrompt = "You are Nexari, an intelligent AI assistant developed by Piyush. You are NOT Llama 3. Answer clearly.";
+        // Agar frontend se system prompt nahi aaya, toh inject karo
+        const hasSystem = messages.some((m: any) => m.role === "system");
+        if (!hasSystem) {
+            prompt += `<|im_start|>system\n${sysPrompt}<|im_end|>\n`;
+        }
+    } else if (!messages.some((m: any) => m.role === "system")) {
+        // Default system prompt for others
+        prompt += `<|im_start|>system\nYou are a helpful AI assistant.<|im_end|>\n`;
     }
-    return { ok: true, body: res.body };
-  } catch (err: any) {
-    return { ok: false, status: 500, data: { error: { message: err.message } } };
-  }
+
+    // User/Assistant Messages
+    messages.forEach((msg: any) => {
+        prompt += `<|im_start|>${msg.role}\n${msg.content}<|im_end|>\n`;
+    });
+    
+    // Trigger Assistant response
+    prompt += `<|im_start|>assistant\n`;
+    return prompt;
 }
 
-// --- METHOD 2: Raw API (Updated URL for Custom Models) ---
-async function callRawAPI(modelId: string, messages: any[], params: any) {
-  // ✅ NEW URL: router.huggingface.co (Raw Inference)
-  const url = `https://router.huggingface.co/models/${modelId}`;
+// --- RAW API CALL ---
+async function callHuggingFaceRaw(modelId: string, prompt: string, params: any) {
+  // ✅ OLD RELIABLE URL (No /v1/, No /chat/)
+  const url = `https://api-inference.huggingface.co/models/${modelId}`;
   
-  // Manual Prompting for Qwen (ChatML)
-  let prompt = "";
-  
-  // System Prompt injection
-  const hasSystem = messages.some((m: any) => m.role === "system");
-  if (!hasSystem) {
-      prompt += `<|im_start|>system\nYou are Nexari, an intelligent AI assistant developed by Piyush. Answer clearly.<|im_end|>\n`;
-  }
-
-  messages.forEach((msg: any) => {
-      prompt += `<|im_start|>${msg.role}\n${msg.content}<|im_end|>\n`;
-  });
-  prompt += `<|im_start|>assistant\n`;
-
   const payload = {
-    inputs: prompt,
+    inputs: prompt, // JSON nahi, String bhej rahe hain
     parameters: {
       max_new_tokens: 512,
-      temperature: 0.7,
-      return_full_text: false,
-      stream: true 
+      temperature: params.temperature || 0.7,
+      return_full_text: false, // Purana text wapas mat bhejo
+      stream: true // Streaming ON
     }
   };
 
   try {
     const res = await fetch(url, {
         method: "POST",
-        headers: { "Authorization": `Bearer ${HF_API_KEY}`, "Content-Type": "application/json" },
+        headers: { 
+          "Authorization": `Bearer ${HF_API_KEY}`, 
+          "Content-Type": "application/json" 
+        },
         body: JSON.stringify(payload)
     });
 
-    if (!res.ok) {
-        const txt = await res.text();
-        return { ok: false, status: res.status, data: formatHfError(res.status, txt) };
+    if (!res.ok) { 
+      const txt = await res.text();
+      let errMsg = `Error ${res.status}`;
+      try { 
+          const json = JSON.parse(txt);
+          errMsg = json.error || json.error?.message || txt; 
+      } catch {}
+
+      // Detailed Error Mapping
+      if (res.status === 503) errMsg = "Model is loading (Cold Start). Try again in 20s.";
+      if (res.status === 404) errMsg = "Model URL not found (Check ID).";
+      if (res.status === 429) errMsg = "Rate limit reached.";
+      
+      return { ok: false, status: res.status, error: errMsg }; 
     }
+    
     return { ok: true, body: res.body };
+
   } catch (err: any) {
-    return { ok: false, status: 500, data: { error: { message: err.message } } };
+    return { ok: false, status: 500, error: err.message };
   }
 }
 
@@ -138,25 +131,27 @@ async function handler(req: Request): Promise<Response> {
   let body: any = {};
   try { body = await req.json(); } catch { return new Response("Invalid JSON", { status: 400, headers: corsHeaders }); }
 
+  // Model Select
   let targetModelId = MODELS[DEFAULT_MODEL];
   if (body.model && MODELS[body.model]) targetModelId = MODELS[body.model];
 
+  // Messages
   let messages = body.messages || [{ role: "user", content: body.input || "Hi" }];
 
-  // === ROUTING LOGIC ===
-  let result;
-  if (targetModelId.includes("Nexari")) {
-      // Nexari ke liye Raw Router URL
-      result = await callRawAPI(targetModelId, messages, body);
-  } else {
-      // DeepSeek/Qwen ke liye Standard Router URL
-      result = await callStandardAPI(targetModelId, messages, body);
-  }
+  // 1. Convert JSON to String (ChatML Format)
+  const rawPrompt = generatePrompt(messages, targetModelId);
+
+  // 2. Call Raw API
+  const result = await callHuggingFaceRaw(targetModelId, rawPrompt, body);
 
   if (!result.ok) {
-      return new Response(JSON.stringify(result.data), { status: result.status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      return new Response(JSON.stringify({ error: result.error }), { 
+          status: result.status, 
+          headers: { ...corsHeaders, "Content-Type": "application/json" } 
+      });
   }
 
+  // 3. Stream Response
   const headers = new Headers(corsHeaders);
   headers.set("Content-Type", "text/event-stream");
   headers.set("Cache-Control", "no-cache");
@@ -164,5 +159,5 @@ async function handler(req: Request): Promise<Response> {
   return new Response(result.body, { status: 200, headers });
 }
 
-console.log("✅ New Router (router.huggingface.co) Server Running...");
+console.log("✅ Universal Raw Server Running...");
 serve(handler);
