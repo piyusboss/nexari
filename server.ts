@@ -12,7 +12,7 @@ if (!HF_API_KEY) {
 
 // Models Mapping
 const MODELS: Record<string, string> = {
-  "Nexari-G1": "Piyush-boss/Nexari-G1-3-8B", 
+  "Nexari-G1": "Piyush-boss/Nexari-Qwen-3B-LoRA", 
   "DeepSeek-R1": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
   "Qwen2.5-72B": "Qwen/Qwen2.5-72B-Instruct", 
 };
