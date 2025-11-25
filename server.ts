@@ -1,18 +1,13 @@
-// server.ts — Final Fix for Incomplete VIP Responses
+// server.ts — Hybrid Mode (Stream for VIP, Wait for Custom)
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
 
 const HF_API_KEY = Deno.env.get("HF_API_KEY") ?? "";
 const SHARED_SECRET = "NEXARI_SECURE_HANDSHAKE_KEY_2025"; 
 
-if (!HF_API_KEY) { console.error("❌ HF_API_KEY missing."); Deno.exit(1); }
-
-// === MODEL MAPPING ===
+// === CONFIG ===
 const MODELS: Record<string, string> = {
-  // 🟢 PERSONAL SPACE (Custom)
   "Nexari-G1": "https://piyush-boss-nexari-server.hf.space/v1/chat/completions",
-  
-  // 🟠 VIP ROUTER (Official High-Speed)
   "DeepSeek-R1": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
   "Qwen2.5-72B": "Qwen/Qwen2.5-72B-Instruct", 
 };
@@ -24,19 +19,17 @@ const corsHeaders = {
   "access-control-allow-headers": "Content-Type, Authorization, X-Nexari-Token",
 };
 
-// --- AUTH ---
 function verifyToken(authHeader: string | null): boolean {
   if (!authHeader) return false;
   try {
-    const [payloadB64, signature] = authHeader.split(".");
-    if (!payloadB64 || !signature) return false;
+    const [p, s] = authHeader.split(".");
+    if (!p || !s) return false;
     const hmac = createHmac("sha256", SHARED_SECRET);
-    hmac.update(payloadB64);
-    return signature === hmac.digest("hex");
+    hmac.update(p);
+    return s === hmac.digest("hex") && JSON.parse(atob(p)).exp > Math.floor(Date.now()/1000);
   } catch { return false; }
 }
 
-// --- HANDLER ---
 async function handler(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
   
@@ -48,33 +41,28 @@ async function handler(req: Request): Promise<Response> {
   try { body = await req.json(); } catch { return new Response("Bad JSON", { status: 400 }); }
 
   let modelKey = body.model || DEFAULT_MODEL;
-  let targetUrl = MODELS[modelKey] || MODELS[DEFAULT_MODEL];
+  let targetEndpoint = MODELS[modelKey] || MODELS[DEFAULT_MODEL];
+  let isCustomSpace = targetEndpoint.includes("hf.space");
+  
+  let finalUrl = isCustomSpace ? targetEndpoint : "https://router.huggingface.co/v1/chat/completions";
 
-  // Logic Check
-  let isCustomSpace = targetUrl.includes("hf.space");
-  if (!isCustomSpace) {
-      targetUrl = "https://router.huggingface.co/v1/chat/completions";
-  }
+  // === HYBRID LOGIC ===
+  // Custom Space = No Stream (Stable)
+  // VIP Models = Stream (Fast)
+  let useStream = !isCustomSpace; 
 
-  // === 🧠 SMART LIMITS (DUAL FORCE) ===
-  // VIP Models ke liye 2048 tokens safe limit hai (4096 kabhi kabhi reject hota hai free tier par)
-  const tokenLimit = isCustomSpace ? 512 : 2048;
-
-  console.log(`🚀 Routing: ${modelKey} | Limit: ${tokenLimit}`);
+  console.log(`🚀 Target: ${modelKey} | Stream: ${useStream}`);
 
   try {
-    // Payload: Hum 'max_tokens' aur 'max_new_tokens' DONO bhejenge
-    // Taaki Router confuse na ho.
     const payload = {
         model: isCustomSpace ? "tgi" : MODELS[modelKey], 
         messages: body.messages,
-        max_tokens: tokenLimit,       // OpenAI Standard
-        max_new_tokens: tokenLimit,   // Hugging Face Standard
+        max_tokens: isCustomSpace ? 256 : 2048, // Custom ke liye limit taaki timeout na ho
         temperature: body.temperature || 0.7,
-        stream: true // Sabke liye Stream ON (Kyunki script.js ab sab sambhal leta hai)
+        stream: useStream // <--- Critical Switch
     };
 
-    const res = await fetch(targetUrl, {
+    const res = await fetch(finalUrl, {
         method: "POST",
         headers: { 
             "Authorization": `Bearer ${HF_API_KEY}`, 
@@ -83,22 +71,31 @@ async function handler(req: Request): Promise<Response> {
         body: JSON.stringify(payload)
     });
 
+    // === Handling Responses ===
+    
+    // 1. Agar Error hai
     if (!res.ok) {
         const text = await res.text();
-        if (res.status === 503) return new Response(JSON.stringify({ error: "Model Loading..." }), { status: 503, headers: corsHeaders });
-        return new Response(JSON.stringify({ error: `HF Error: ${text}` }), { status: res.status, headers: corsHeaders });
+        if (res.status === 503) return new Response(JSON.stringify({ error: { code: "LOADING", message: "Model is warming up..." } }), { status: 503, headers: corsHeaders });
+        return new Response(JSON.stringify({ error: `Upstream Error: ${text}` }), { status: res.status, headers: corsHeaders });
     }
 
-    // Direct Pipe (Zero Latency)
-    return new Response(res.body, { 
-        status: 200, 
-        headers: { 
-            ...corsHeaders, 
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive"
-        } 
-    });
+    // 2. Agar Stream Hai (VIP) -> Direct Pipe
+    if (useStream) {
+        return new Response(res.body, { 
+            status: 200, 
+            headers: { ...corsHeaders, "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" } 
+        });
+    } 
+    
+    // 3. Agar JSON Hai (Nexari) -> Wait & Send
+    else {
+        const jsonResponse = await res.json();
+        return new Response(JSON.stringify(jsonResponse), { 
+            status: 200, 
+            headers: { ...corsHeaders, "Content-Type": "application/json" } 
+        });
+    }
 
   } catch (err: any) {
     return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: corsHeaders });
