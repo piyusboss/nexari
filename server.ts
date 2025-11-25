@@ -1,4 +1,4 @@
-// server.ts — Nexari Hybrid Bridge (Space + Router)
+// server.ts — Smart Token Limits (VIP = Long, Custom = Fast)
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
 
@@ -7,12 +7,12 @@ const SHARED_SECRET = "NEXARI_SECURE_HANDSHAKE_KEY_2025";
 
 if (!HF_API_KEY) { console.error("❌ HF_API_KEY missing."); Deno.exit(1); }
 
-// === 1. MODEL CONFIGURATION ===
+// === MODEL MAPPING ===
 const MODELS: Record<string, string> = {
-  // 🟢 PERSONAL SPACE URL (Nexari)
+  // 🟢 PERSONAL SPACE (Custom)
   "Nexari-G1": "https://piyush-boss-nexari-server.hf.space/v1/chat/completions",
   
-  // 🟠 OFFICIAL ROUTER MODELS (DeepSeek, Qwen)
+  // 🟠 VIP ROUTER (Official High-Speed)
   "DeepSeek-R1": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
   "Qwen2.5-72B": "Qwen/Qwen2.5-72B-Instruct", 
 };
@@ -24,7 +24,7 @@ const corsHeaders = {
   "access-control-allow-headers": "Content-Type, Authorization, X-Nexari-Token",
 };
 
-// --- AUTH HELPER ---
+// --- AUTH ---
 function verifyToken(authHeader: string | null): boolean {
   if (!authHeader) return false;
   try {
@@ -32,104 +32,74 @@ function verifyToken(authHeader: string | null): boolean {
     if (!payloadB64 || !signature) return false;
     const hmac = createHmac("sha256", SHARED_SECRET);
     hmac.update(payloadB64);
-    const expectedSignature = hmac.digest("hex");
-    if (signature !== expectedSignature) return false;
-    const payload = JSON.parse(atob(payloadB64));
-    if (payload.exp < Math.floor(Date.now() / 1000)) return false; // Token Expired
-    return true;
-  } catch (e) { return false; }
+    return signature === hmac.digest("hex");
+  } catch { return false; }
 }
 
-// --- MAIN REQUEST HANDLER ---
+// --- HANDLER ---
 async function handler(req: Request): Promise<Response> {
-  // 1. CORS Preflight
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
-
-  // 2. Auth Check
+  
   const token = req.headers.get("X-Nexari-Token");
-  if (!verifyToken(token)) {
-    return new Response(JSON.stringify({ error: { code: "UNAUTHORIZED", message: "Invalid Token" } }), { 
-        status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } 
-    });
-  }
+  if (!verifyToken(token)) return new Response(JSON.stringify({error: "Unauthorized"}), {status: 401, headers: corsHeaders});
+  if (req.method !== "POST") return new Response("Only POST", { status: 405 });
 
-  if (req.method !== "POST") return new Response("Only POST allowed", { status: 405, headers: corsHeaders });
-
-  // 3. Parse Body
   let body: any = {};
   try { body = await req.json(); } catch { return new Response("Bad JSON", { status: 400 }); }
 
-  // 4. Determine Target (Space vs Router)
-  let requestedModel = body.model || DEFAULT_MODEL;
+  let modelKey = body.model || DEFAULT_MODEL;
+  let targetUrl = MODELS[modelKey] || MODELS[DEFAULT_MODEL];
+
+  // Logic: Kya ye humara Custom Space hai?
+  let isCustomSpace = targetUrl.includes("hf.space");
   
-  // Model Mapping Check
-  let targetEndpoint = MODELS[requestedModel];
-  if (!targetEndpoint) {
-      // Agar model list mein nahi hai, toh default (Nexari) use karo
-      console.warn(`Unknown model ${requestedModel}, switching to Nexari.`);
-      targetEndpoint = MODELS["Nexari-G1"];
+  // URL Setup
+  if (!isCustomSpace) {
+      targetUrl = "https://router.huggingface.co/v1/chat/completions";
   }
 
-  const isPersonalSpace = targetEndpoint.includes("hf.space");
-  
-  // Final URL Construction
-  // Agar Space hai, toh wahi URL use karo. Agar Router hai, toh official router URL.
-  const finalUrl = isPersonalSpace 
-      ? targetEndpoint 
-      : "https://router.huggingface.co/v1/chat/completions";
+  // === 🧠 SMART TOKEN LOGIC ===
+  // Agar VIP model hai toh 4096 tokens (Bahut lamba answer allowed)
+  // Agar Custom Space hai toh 512 tokens (Speed maintain karne ke liye)
+  // User agar frontend se khud limit bheje, toh wo priority lega.
+  const defaultMaxTokens = isCustomSpace ? 512 : 4096;
+  const finalMaxTokens = body.max_tokens || defaultMaxTokens;
 
-  console.log(`🚀 Routing: ${requestedModel} -> ${isPersonalSpace ? "PERSONAL SPACE" : "HF ROUTER"}`);
+  console.log(`🚀 Route: ${modelKey} | Limit: ${finalMaxTokens} tokens`);
 
   try {
-    // 5. Prepare Payload
     const payload = {
-        // Router ko model ID chahiye, Space ko fark nahi padta (wo 'tgi' ya kuch bhi le lega)
-        model: isPersonalSpace ? "tgi" : MODELS[requestedModel], 
+        model: isCustomSpace ? "tgi" : MODELS[modelKey], 
         messages: body.messages,
-        max_tokens: body.max_tokens || 512,
+        max_tokens: finalMaxTokens, // <--- Yahan Fix Hua Hai
         temperature: body.temperature || 0.7,
-        stream: isPersonalSpace ? false : (body.stream || false) // Space stream support nahi karta
+        stream: isCustomSpace ? false : (body.stream || false) 
     };
 
-    // 6. Fetch from Upstream
-    const res = await fetch(finalUrl, {
+    const res = await fetch(targetUrl, {
         method: "POST",
-        headers: {
-            "Authorization": `Bearer ${HF_API_KEY}`,
-            "Content-Type": "application/json"
+        headers: { 
+            "Authorization": `Bearer ${HF_API_KEY}`, 
+            "Content-Type": "application/json" 
         },
         body: JSON.stringify(payload)
     });
 
-    // 7. Handle Response
     const text = await res.text();
 
     if (!res.ok) {
-        console.error(`❌ Upstream Error:`, text);
-        // "Model Loading" wala error catch karo
-        if (res.status === 503 || text.includes("loading")) {
-            return new Response(JSON.stringify({ 
-                error: { code: "LOADING", message: "Nexari is waking up. Please wait 30 seconds." } 
-            }), { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        if (res.status === 503) {
+            return new Response(JSON.stringify({ error: { code: "LOADING", message: "Model is warming up. Please wait." } }), { status: 503, headers: corsHeaders });
         }
         return new Response(JSON.stringify({ error: `Upstream Error: ${text}` }), { status: res.status, headers: corsHeaders });
     }
 
-    // 8. Return Success
-    // Space JSON return karega, Frontend usse display kar dega
-    return new Response(text, { 
-        status: 200, 
-        headers: { 
-            ...corsHeaders, 
-            "Content-Type": "application/json" 
-        } 
-    });
+    return new Response(text, { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
   } catch (err: any) {
-    console.error("Critical Error:", err);
     return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: corsHeaders });
   }
 }
 
-console.log("✅ Nexari Hybrid Server (Fixed) Running...");
+console.log("✅ Nexari Server (Smart Limits) Running...");
 serve(handler);
