@@ -1,4 +1,4 @@
-// server.ts — Deno Server (Fixed for Custom Models)
+// server.ts — Deno Server (Hybrid Routing Fix)
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
 
@@ -19,17 +19,19 @@ const MODELS: Record<string, string> = {
 
 const DEFAULT_MODEL = "Nexari-G1"; 
 
-// === NEW LOGIC: URL Selection ===
-// Custom models ke liye 'api-inference' use karenge, Popular ke liye 'router'
+// === NEW URL LOGIC (Based on Nov 2024 Changes) ===
 function getModelUrl(modelId: string): string {
-  // Agar Nexari (Custom) hai, toh Direct Inference API use karo
+  // RULE 1: Custom Models ke liye "Model-Specific Router" use karo
+  // Kyunki ye "Global Provider List" mein nahi hote.
   if (modelId.includes("Piyush-boss") || modelId.includes("Nexari")) {
-    console.log("⚠️ Using Direct Inference API for Custom Model");
-    // Yeh URL OpenAI format (/v1/chat/completions) support karta hai custom models ke liye
-    return `https://api-inference.huggingface.co/models/${modelId}/v1/chat/completions`;
+    console.log(`Using Custom Router Endpoint for: ${modelId}`);
+    // NEW FORMAT: https://router.huggingface.co/models/{USER}/{REPO}/v1/chat/completions
+    return `https://router.huggingface.co/models/${modelId}/v1/chat/completions`;
   }
   
-  // Baaki sab ke liye Router (Fast & Standard)
+  // RULE 2: Popular Models ke liye "Global Router" use karo
+  // Ye load balancing handle karta hai multiple providers ke beech.
+  console.log(`Using Global Router for VIP model: ${modelId}`);
   return `https://router.huggingface.co/v1/chat/completions`;
 }
 
@@ -56,7 +58,7 @@ function verifyToken(authHeader: string | null): boolean {
   }
 }
 
-// --- ERROR FORMATTING ---
+// --- ERROR HANDLING ---
 function formatHfError(status: number, rawBody: string) {
   let code = "UNKNOWN_ERROR";
   let message = "An unexpected error occurred.";
@@ -66,14 +68,17 @@ function formatHfError(status: number, rawBody: string) {
       const jsonBody = JSON.parse(rawBody);
       originalError = jsonBody?.error?.message || jsonBody?.error || JSON.stringify(jsonBody);
       
-      if (status === 503) { 
+      // 410 Gone (Agar galti se purana URL hit ho jaye)
+      if (status === 410) {
+        code = "API_DEPRECATED";
+        message = "System Update: The API endpoint has moved. Check server logs.";
+      }
+      else if (status === 503) { 
         code = "MODEL_LOADING"; 
-        // User ko batana zaroori hai ki model load ho raha hai
-        message = "Nexari is waking up from sleep. Please try again in 20 seconds."; 
+        message = "Nexari is waking up (Cold Boot). Please try again in 30 seconds."; 
       }
       else if (status === 429) { code = "HEAVY_TRAFFIC"; message = "Server busy. Try again later."; }
-      else if (status === 400) { code = "INVALID_REQUEST"; message = `Configuration Error: ${originalError}`; }
-      else if (status === 404) { code = "NOT_FOUND"; message = "Model URL not found. Check repository name."; }
+      else if (status === 400) { code = "INVALID_REQUEST"; message = `Config Error: ${originalError}`; }
       else { message = `HF Error (${status}): ${originalError}`; }
       
       return { error: { code, message, details: originalError } };
@@ -84,9 +89,8 @@ function formatHfError(status: number, rawBody: string) {
 
 // --- API CALLS ---
 async function callRouterStream(modelId: string, payload: unknown): Promise<Response> {
-  // Dynamic URL Logic
-  const url = getModelUrl(modelId);
-  console.log(`🚀 Sending Stream Request to: ${url}`);
+  const url = getModelUrl(modelId); // Dynamic URL Selection
+  console.log(`🚀 Sending Request to: ${url}`);
 
   try {
     const res = await fetch(url, {
@@ -115,8 +119,7 @@ async function callRouterStream(modelId: string, payload: unknown): Promise<Resp
 }
 
 async function callRouterJson(modelId: string, payload: unknown) {
-    // Dynamic URL Logic
-    const url = getModelUrl(modelId);
+    const url = getModelUrl(modelId); // Dynamic URL Selection
     console.log(`🚀 Sending JSON Request to: ${url}`);
 
     try {
@@ -156,14 +159,14 @@ async function handler(req: Request): Promise<Response> {
   if (body.model && MODELS[body.model]) targetModelId = MODELS[body.model];
 
   const chatPayload: any = { 
-      model: targetModelId, 
+      model: targetModelId, // Custom Router Endpoint ke liye ye ignore ho sakta hai, par global ke liye zaroori hai
       messages: messages,
       max_tokens: body.max_tokens || 512, 
-      temperature: body.temperature || 0.7
+      temperature: body.temperature || 0.7,
+      stream: body.stream || false
   };
   
-  // Forward to Dynamic HF URL
-  if (body.stream === true) {
+  if (chatPayload.stream === true) {
     return await callRouterStream(targetModelId, chatPayload);
   } else {
     const res = await callRouterJson(targetModelId, chatPayload);
@@ -171,5 +174,5 @@ async function handler(req: Request): Promise<Response> {
   }
 }
 
-console.log("✅ Nexari Dynamic Server Running...");
+console.log("✅ Nexari Hybrid Server v2 Running...");
 serve(handler);
