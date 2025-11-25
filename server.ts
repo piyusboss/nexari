@@ -1,18 +1,13 @@
-// server.ts — Smart Token Limits (VIP = Long, Custom = Fast)
+// server.ts — True Streaming Proxy (No Buffering)
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
 
 const HF_API_KEY = Deno.env.get("HF_API_KEY") ?? "";
 const SHARED_SECRET = "NEXARI_SECURE_HANDSHAKE_KEY_2025"; 
 
-if (!HF_API_KEY) { console.error("❌ HF_API_KEY missing."); Deno.exit(1); }
-
-// === MODEL MAPPING ===
+// === CONFIG ===
 const MODELS: Record<string, string> = {
-  // 🟢 PERSONAL SPACE (Custom)
   "Nexari-G1": "https://piyush-boss-nexari-server.hf.space/v1/chat/completions",
-  
-  // 🟠 VIP ROUTER (Official High-Speed)
   "DeepSeek-R1": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
   "Qwen2.5-72B": "Qwen/Qwen2.5-72B-Instruct", 
 };
@@ -24,19 +19,18 @@ const corsHeaders = {
   "access-control-allow-headers": "Content-Type, Authorization, X-Nexari-Token",
 };
 
-// --- AUTH ---
 function verifyToken(authHeader: string | null): boolean {
   if (!authHeader) return false;
   try {
-    const [payloadB64, signature] = authHeader.split(".");
-    if (!payloadB64 || !signature) return false;
+    const [p, s] = authHeader.split(".");
+    if (!p || !s) return false;
     const hmac = createHmac("sha256", SHARED_SECRET);
-    hmac.update(payloadB64);
-    return signature === hmac.digest("hex");
+    hmac.update(p);
+    if (s !== hmac.digest("hex")) return false;
+    return JSON.parse(atob(p)).exp > Math.floor(Date.now()/1000);
   } catch { return false; }
 }
 
-// --- HANDLER ---
 async function handler(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
   
@@ -48,35 +42,23 @@ async function handler(req: Request): Promise<Response> {
   try { body = await req.json(); } catch { return new Response("Bad JSON", { status: 400 }); }
 
   let modelKey = body.model || DEFAULT_MODEL;
-  let targetUrl = MODELS[modelKey] || MODELS[DEFAULT_MODEL];
-
-  // Logic: Kya ye humara Custom Space hai?
-  let isCustomSpace = targetUrl.includes("hf.space");
+  let targetEndpoint = MODELS[modelKey] || MODELS[DEFAULT_MODEL];
+  let isCustomSpace = targetEndpoint.includes("hf.space");
   
-  // URL Setup
-  if (!isCustomSpace) {
-      targetUrl = "https://router.huggingface.co/v1/chat/completions";
-  }
-
-  // === 🧠 SMART TOKEN LOGIC ===
-  // Agar VIP model hai toh 4096 tokens (Bahut lamba answer allowed)
-  // Agar Custom Space hai toh 512 tokens (Speed maintain karne ke liye)
-  // User agar frontend se khud limit bheje, toh wo priority lega.
-  const defaultMaxTokens = isCustomSpace ? 512 : 4096;
-  const finalMaxTokens = body.max_tokens || defaultMaxTokens;
-
-  console.log(`🚀 Route: ${modelKey} | Limit: ${finalMaxTokens} tokens`);
+  // URL Determine karo
+  let finalUrl = isCustomSpace ? targetEndpoint : "https://router.huggingface.co/v1/chat/completions";
 
   try {
+    // Payload prepare karo (Stream ON for everyone now)
     const payload = {
         model: isCustomSpace ? "tgi" : MODELS[modelKey], 
         messages: body.messages,
-        max_tokens: finalMaxTokens, // <--- Yahan Fix Hua Hai
+        max_tokens: body.max_tokens || 512,
         temperature: body.temperature || 0.7,
-        stream: isCustomSpace ? false : (body.stream || false) 
+        stream: true // <--- ZAROORI: Dono ke liye True karo
     };
 
-    const res = await fetch(targetUrl, {
+    const res = await fetch(finalUrl, {
         method: "POST",
         headers: { 
             "Authorization": `Bearer ${HF_API_KEY}`, 
@@ -85,21 +67,28 @@ async function handler(req: Request): Promise<Response> {
         body: JSON.stringify(payload)
     });
 
-    const text = await res.text();
-
+    // Error Check
     if (!res.ok) {
-        if (res.status === 503) {
-            return new Response(JSON.stringify({ error: { code: "LOADING", message: "Model is warming up. Please wait." } }), { status: 503, headers: corsHeaders });
-        }
-        return new Response(JSON.stringify({ error: `Upstream Error: ${text}` }), { status: res.status, headers: corsHeaders });
+        const text = await res.text();
+        if (res.status === 503) return new Response(JSON.stringify({ error: "Model Loading..." }), { status: 503, headers: corsHeaders });
+        return new Response(JSON.stringify({ error: `HF Error: ${text}` }), { status: res.status, headers: corsHeaders });
     }
 
-    return new Response(text, { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    // === THE MAGIC: DIRECT PIPE (No Await Text) ===
+    // Hum response body ko seedha browser ko bhej rahe hain bina roke
+    return new Response(res.body, { 
+        status: 200, 
+        headers: { 
+            ...corsHeaders, 
+            "Content-Type": "text/event-stream", // Browser ko batao stream aane wali hai
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive"
+        } 
+    });
 
   } catch (err: any) {
     return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: corsHeaders });
   }
 }
 
-console.log("✅ Nexari Server (Smart Limits) Running...");
 serve(handler);
