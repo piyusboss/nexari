@@ -1,14 +1,11 @@
-// server.ts — Deno Server (Latest 2025 Architecture: Raw vs Router)
+// server.ts — THE FINAL BRIDGE (VIP = Router, Custom = Raw Translator)
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
 
 const HF_API_KEY = Deno.env.get("HF_API_KEY") ?? "";
 const SHARED_SECRET = "NEXARI_SECURE_HANDSHAKE_KEY_2025"; 
 
-if (!HF_API_KEY) {
-  console.error("❌ HF_API_KEY missing.");
-  Deno.exit(1);
-}
+if (!HF_API_KEY) { console.error("❌ HF_API_KEY missing."); Deno.exit(1); }
 
 // === MODEL CONFIG ===
 const MODELS: Record<string, string> = {
@@ -16,45 +13,7 @@ const MODELS: Record<string, string> = {
   "DeepSeek-R1": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
   "Qwen2.5-72B": "Qwen/Qwen2.5-72B-Instruct", 
 };
-
 const DEFAULT_MODEL = "Nexari-G1"; 
-
-// === HELPER: Manual Chat Template (Qwen Format) ===
-// Kyunki Raw API "messages" array nahi samajhta, humein text bhejna hoga.
-function applyChatTemplate(messages: any[]): string {
-  let prompt = "";
-  // System Prompt Handle karo (Agar pehla message system hai)
-  if (messages[0].role === "system") {
-      prompt += `<|im_start|>system\n${messages[0].content}<|im_end|>\n`;
-      messages = messages.slice(1);
-  } else {
-      // Default System Prompt for Nexari
-      prompt += `<|im_start|>system\nYou are Nexari, a helpful AI assistant.<|im_end|>\n`;
-  }
-
-  for (const msg of messages) {
-    prompt += `<|im_start|>${msg.role}\n${msg.content}<|im_end|>\n`;
-  }
-  // Assistant ko trigger karne ke liye
-  prompt += `<|im_start|>assistant\n`;
-  return prompt;
-}
-
-// === URL SELECTION ===
-function getModelConfig(modelId: string) {
-  // Custom Models use RAW Generation Endpoint
-  if (modelId.includes("Piyush-boss") || modelId.includes("Nexari")) {
-    return {
-      type: "CUSTOM",
-      url: `https://api-inference.huggingface.co/models/${modelId}`, // Note: No /v1/chat here!
-    };
-  }
-  // VIP Models use Global Router (OpenAI Compatible)
-  return {
-    type: "VIP",
-    url: `https://router.huggingface.co/v1/chat/completions`
-  };
-}
 
 const corsHeaders = {
   "access-control-allow-origin": "*",
@@ -62,54 +21,72 @@ const corsHeaders = {
   "access-control-allow-headers": "Content-Type, Authorization, X-Nexari-Token",
 };
 
-// --- ERROR HANDLING ---
-function formatHfError(status: number, rawBody: string) {
-  let message = rawBody;
-  try {
-      const json = JSON.parse(rawBody);
-      message = json.error || json.message || JSON.stringify(json);
-  } catch {}
+// === 🧠 THE TRANSLATOR BRAIN (JSON -> RAW STRING) ===
+// Custom models raw text mangte hain, unhe JSON samajh nahi aata
+function convertMessagesToQwenPrompt(messages: any[]): string {
+  let prompt = "";
+  // System Prompt (Agar user ne nahi diya, toh default lagao)
+  const hasSystem = messages.length > 0 && messages[0].role === "system";
+  if (!hasSystem) {
+    prompt += "<|im_start|>system\nYou are Nexari, a helpful AI assistant.<|im_end|>\n";
+  }
 
-  if (status === 503) return { error: { code: "LOADING", message: "Model is loading (Cold Boot). Wait 20s." } };
-  if (status === 404) return { error: { code: "NOT_FOUND", message: "Model endpoint not found. Check URL logic." } };
-  return { error: { code: `HF_${status}`, message: `HF Error: ${message}` } };
+  // Messages Loop
+  for (const msg of messages) {
+    prompt += `<|im_start|>${msg.role}\n${msg.content}<|im_end|>\n`;
+  }
+  // Assistant Trigger
+  prompt += "<|im_start|>assistant\n";
+  return prompt;
 }
 
-// --- HANDLER ---
+// === AUTH ===
+function verifyToken(authHeader: string | null): boolean {
+  if (!authHeader) return false;
+  try {
+    const [payloadB64, signature] = authHeader.split(".");
+    if (!payloadB64 || !signature) return false;
+    const hmac = createHmac("sha256", SHARED_SECRET);
+    hmac.update(payloadB64);
+    return signature === hmac.digest("hex");
+  } catch { return false; }
+}
+
+// === HANDLER ===
 async function handler(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
-
-  // 1. Auth Check
+  
   const token = req.headers.get("X-Nexari-Token");
-  // Simple check for now to debug (Add verifyToken logic back if needed strictly)
-  if (!token) return new Response(JSON.stringify({error: "No Token"}), {status: 401, headers: corsHeaders});
-
+  if (!verifyToken(token)) return new Response(JSON.stringify({error: "Unauthorized"}), {status: 401, headers: corsHeaders});
   if (req.method !== "POST") return new Response("Only POST", { status: 405 });
 
   let body: any = {};
   try { body = await req.json(); } catch { return new Response("Bad JSON", { status: 400 }); }
 
   let targetModelId = MODELS[body.model] || MODELS[DEFAULT_MODEL];
-  const config = getModelConfig(targetModelId);
+  const isCustomModel = targetModelId.includes("Piyush-boss") || targetModelId.includes("Nexari");
 
-  console.log(`🎯 Request: ${targetModelId} via [${config.type}] mode`);
+  console.log(`🎯 Logic: ${isCustomModel ? "CUSTOM (Raw Bridge)" : "VIP (Router)"} for ${targetModelId}`);
 
   try {
-    let finalPayload: any;
-    let finalHeaders = {
-        "Authorization": `Bearer ${HF_API_KEY}`,
-        "Content-Type": "application/json"
+    let fetchUrl = "";
+    let fetchPayload = {};
+    const headers = { 
+        "Authorization": `Bearer ${HF_API_KEY}`, 
+        "Content-Type": "application/json" 
     };
 
-    // === LOGIC BRANCHING ===
-    
-    if (config.type === "CUSTOM") {
-        // SCENARIO A: CUSTOM MODEL (Raw Text)
-        // Convert Messages to String
-        const inputs = applyChatTemplate(body.messages || []);
+    // === BRANCHING LOGIC ===
+    if (isCustomModel) {
+        // 🛠️ CUSTOM PATH (The Bridge)
+        // URL: Seedha model root par hit karo (No /v1/chat)
+        fetchUrl = `https://api-inference.huggingface.co/models/${targetModelId}`;
         
-        finalPayload = {
-            inputs: inputs,
+        // Input: Raw String banao
+        const rawInput = convertMessagesToQwenPrompt(body.messages || []);
+        
+        fetchPayload = {
+            inputs: rawInput,
             parameters: {
                 max_new_tokens: body.max_tokens || 512,
                 temperature: body.temperature || 0.7,
@@ -117,66 +94,66 @@ async function handler(req: Request): Promise<Response> {
             }
         };
     } else {
-        // SCENARIO B: VIP MODEL (OpenAI Format)
-        finalPayload = {
+        // 🚀 VIP PATH (Router)
+        fetchUrl = "https://router.huggingface.co/v1/chat/completions";
+        fetchPayload = {
             model: targetModelId,
             messages: body.messages,
             max_tokens: body.max_tokens,
             temperature: body.temperature,
-            stream: false // Simplicity ke liye stream off rakha hai abhi
+            stream: false
         };
     }
 
-    // Call Hugging Face
-    const res = await fetch(config.url, {
-        method: "POST",
-        headers: finalHeaders,
-        body: JSON.stringify(finalPayload)
+    // === EXECUTE REQUEST ===
+    const res = await fetch(fetchUrl, {
+        method: "POST", headers, body: JSON.stringify(fetchPayload)
     });
 
-    const text = await res.text();
-    
+    const rawText = await res.text();
+
     if (!res.ok) {
-        console.error(`❌ Error [${res.status}]:`, text);
-        const errData = formatHfError(res.status, text);
-        return new Response(JSON.stringify(errData), { status: res.status, headers: {...corsHeaders, "Content-Type": "application/json"} });
+        console.error(`HF Error [${res.status}]:`, rawText);
+        // Special case for loading
+        if (res.status === 503) {
+             return new Response(JSON.stringify({ error: { code: "LOADING", message: "Nexari is waking up (Cold Boot). Try in 20s." } }), { status: 503, headers: corsHeaders });
+        }
+        return new Response(JSON.stringify({ error: `HF Error: ${rawText}` }), { status: res.status, headers: corsHeaders });
     }
 
-    // === RESPONSE NORMALIZATION ===
-    // Hum frontend ko hamesha OpenAI format hi bhejenge, chahe peeche kuch bhi ho
-    let finalData;
-
-    if (config.type === "CUSTOM") {
-        // Raw API returns: [{ generated_text: "..." }]
-        const rawResponse = JSON.parse(text);
-        const generatedText = rawResponse[0]?.generated_text || "";
+    // === RESPONSE ADAPTER (Sabko OpenAI Format bana do) ===
+    let finalJson;
+    
+    if (isCustomModel) {
+        // Raw API returns: [{ "generated_text": "Hello world" }]
+        // Ise hum OpenAI format mein wrap karenge
+        const rawData = JSON.parse(rawText);
+        const reply = Array.isArray(rawData) ? rawData[0].generated_text : (rawData.generated_text || "");
         
-        // Mock OpenAI Structure
-        finalData = {
+        finalJson = {
             id: crypto.randomUUID(),
             object: "chat.completion",
             created: Date.now(),
             choices: [{
                 index: 0,
-                message: { role: "assistant", content: generatedText },
+                message: { role: "assistant", content: reply },
                 finish_reason: "stop"
             }]
         };
     } else {
-        // Router returns OpenAI format directly
-        finalData = JSON.parse(text);
+        // Router already returns OpenAI JSON
+        finalJson = JSON.parse(rawText);
     }
 
-    return new Response(JSON.stringify(finalData), { 
+    return new Response(JSON.stringify(finalJson), { 
         status: 200, 
         headers: { ...corsHeaders, "Content-Type": "application/json" } 
     });
 
   } catch (err: any) {
-    console.error("Critical:", err);
     return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: corsHeaders });
   }
 }
 
-console.log("✅ Nexari Universal Server (2025 Edition) Running...");
+console.log("✅ 2025 Bridge Server Running...");
 serve(handler);
