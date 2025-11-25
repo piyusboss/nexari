@@ -1,4 +1,4 @@
-// server.ts — Deno Server (2025 Architecture: Strict Bifurcation)
+// server.ts — The Final Connection (Nexari Space + VIP Router)
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
 
@@ -7,9 +7,13 @@ const SHARED_SECRET = "NEXARI_SECURE_HANDSHAKE_KEY_2025";
 
 if (!HF_API_KEY) { console.error("❌ HF_API_KEY missing."); Deno.exit(1); }
 
-// === MODEL CONFIG ===
+// === MODEL MAPPING ===
 const MODELS: Record<string, string> = {
-  "Nexari-G1": "Piyush-boss/Nexari-Qwen-3B-Full",
+  // 🟢 YEH HAI TUMHARA NAYA SPACE URL
+  // Note: Hum seedha '/v1/chat/completions' par hit karenge jo tumne app.py mein banaya hai
+  "Nexari-G1": "https://piyush-boss-nexari-server.hf.space/v1/chat/completions",
+  
+  // VIP Models abhi bhi HF Router se chalenge
   "DeepSeek-R1": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
   "Qwen2.5-72B": "Qwen/Qwen2.5-72B-Instruct", 
 };
@@ -21,24 +25,7 @@ const corsHeaders = {
   "access-control-allow-headers": "Content-Type, Authorization, X-Nexari-Token",
 };
 
-// === HELPER: Prompt Engineering for Custom Model (JSON -> RAW) ===
-// Custom endpoint ab '/v1/chat' support nahi karta, isliye humein string banani padegi
-function convertMessagesToRawPrompt(messages: any[]): string {
-  let prompt = "";
-  // System Prompt Logic
-  const hasSystem = messages.length > 0 && messages[0].role === "system";
-  if (!hasSystem) {
-    prompt += "<|im_start|>system\nYou are Nexari, a helpful AI assistant.<|im_end|>\n";
-  }
-
-  for (const msg of messages) {
-    prompt += `<|im_start|>${msg.role}\n${msg.content}<|im_end|>\n`;
-  }
-  prompt += "<|im_start|>assistant\n";
-  return prompt;
-}
-
-// === AUTH ===
+// --- AUTH ---
 function verifyToken(authHeader: string | null): boolean {
   if (!authHeader) return false;
   try {
@@ -50,7 +37,7 @@ function verifyToken(authHeader: string | null): boolean {
   } catch { return false; }
 }
 
-// === MAIN HANDLER ===
+// --- HANDLER ---
 async function handler(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
 
@@ -62,117 +49,59 @@ async function handler(req: Request): Promise<Response> {
   let body: any = {};
   try { body = await req.json(); } catch { return new Response("Bad JSON", { status: 400 }); }
 
-  let targetModelId = MODELS[body.model] || MODELS[DEFAULT_MODEL];
-  const isCustomModel = targetModelId.includes("Piyush-boss") || targetModelId.includes("Nexari");
+  // 1. Target URL choose karo
+  let modelKey = body.model || DEFAULT_MODEL;
+  let targetUrl = MODELS[modelKey] || MODELS[DEFAULT_MODEL];
 
-  console.log(`🎯 TARGET: ${targetModelId} | MODE: ${isCustomModel ? "CUSTOM (Raw)" : "VIP (Router)"}`);
+  // Logic: Agar ye tumhara Space hai, toh URL wahi rahega.
+  // Agar ye VIP model hai, toh HF Router URL banega.
+  let isCustomSpace = targetUrl.includes("hf.space");
+  
+  if (!isCustomSpace) {
+      targetUrl = "https://router.huggingface.co/v1/chat/completions";
+  }
+
+  console.log(`🚀 Route: ${isCustomSpace ? "Custom Space (Nexari)" : "HF Router (VIP)"} -> ${modelKey}`);
 
   try {
-    let fetchUrl = "";
-    let fetchPayload = {};
-    const headers = { 
-        "Authorization": `Bearer ${HF_API_KEY}`, 
-        "Content-Type": "application/json" 
+    // 2. Payload Finalize karo
+    const payload = {
+        // Space ko model name se fark nahi padta, par Router ko padta hai
+        model: isCustomSpace ? "nexari" : MODELS[modelKey], 
+        messages: body.messages,
+        max_tokens: body.max_tokens || 512,
+        temperature: body.temperature || 0.7,
+        stream: false 
     };
 
-    // ==========================================
-    // PATH 1: CUSTOM MODEL (Legacy/Raw Endpoint)
-    // ==========================================
-    if (isCustomModel) {
-        // Correct URL for 2025: Direct Model Endpoint (No /v1/chat)
-        fetchUrl = `https://api-inference.huggingface.co/models/${targetModelId}`;
-        
-        // Convert JSON messages to Raw String
-        const rawInput = convertMessagesToRawPrompt(body.messages || []);
-        
-        fetchPayload = {
-            inputs: rawInput,
-            parameters: {
-                max_new_tokens: body.max_tokens || 512,
-                temperature: body.temperature || 0.7,
-                return_full_text: false // Very Important: Sirf new text chahiye
-            }
-        };
-
-    // ==========================================
-    // PATH 2: VIP MODEL (Router Endpoint)
-    // ==========================================
-    } else {
-        // Router supports OpenAI format natively
-        fetchUrl = "https://router.huggingface.co/v1/chat/completions";
-        fetchPayload = {
-            model: targetModelId,
-            messages: body.messages,
-            max_tokens: body.max_tokens,
-            temperature: body.temperature,
-            stream: false
-        };
-    }
-
-    // === EXECUTE REQUEST ===
-    const res = await fetch(fetchUrl, {
-        method: "POST", headers, body: JSON.stringify(fetchPayload)
+    const res = await fetch(targetUrl, {
+        method: "POST",
+        headers: { 
+            // Space Public hai toh token ki zaroorat nahi, par Router ko chahiye
+            "Authorization": `Bearer ${HF_API_KEY}`, 
+            "Content-Type": "application/json" 
+        },
+        body: JSON.stringify(payload)
     });
 
-    const rawText = await res.text();
+    const text = await res.text();
 
     if (!res.ok) {
-        console.error(`❌ HF Error [${res.status}]:`, rawText);
-        // Custom Handling for Loading State
-        if (res.status === 503) {
-             return new Response(JSON.stringify({ error: { code: "LOADING", message: "Model is loading. Try again in 20s." } }), { status: 503, headers: corsHeaders });
-        }
-        return new Response(JSON.stringify({ error: `HF Error: ${rawText}` }), { status: res.status, headers: corsHeaders });
+        console.error(`❌ Error:`, text);
+        return new Response(JSON.stringify({ error: `Upstream Error (${res.status}): ${text}` }), { status: res.status, headers: corsHeaders });
     }
 
-    // === RESPONSE HANDLING (Normalize to OpenAI Format) ===
-    let finalJson;
-
-    if (isCustomModel) {
-        // Case A: Custom Model returns Raw Array -> [{ generated_text: "..." }]
-        try {
-            const rawData = JSON.parse(rawText);
-            const reply = Array.isArray(rawData) ? rawData[0]?.generated_text : rawData?.generated_text;
-            
-            finalJson = {
-                id: crypto.randomUUID(),
-                object: "chat.completion",
-                created: Date.now(),
-                choices: [{
-                    index: 0,
-                    message: { role: "assistant", content: reply || "" }, // Empty string fallback
-                    finish_reason: "stop"
-                }]
-            };
-        } catch (e) {
-            console.error("Custom Parse Error:", e);
-            finalJson = { error: "Failed to parse custom model response" };
-        }
-    } else {
-        // Case B: VIP/Router returns OpenAI Format directly
-        // Hum seedha pass-through karenge taaki koi data loss na ho
-        try {
-            finalJson = JSON.parse(rawText);
-            // Debugging: Check if content exists
-            if (!finalJson.choices || !finalJson.choices[0]?.message?.content) {
-                console.warn("⚠️ VIP Response format suspicious:", rawText);
-            }
-        } catch (e) {
-            console.error("VIP Parse Error:", e);
-            finalJson = { error: "Failed to parse VIP model response" };
-        }
-    }
-
-    return new Response(JSON.stringify(finalJson), { 
+    // 3. Success! JSON wapas bhejo
+    return new Response(text, { 
         status: 200, 
         headers: { ...corsHeaders, "Content-Type": "application/json" } 
     });
 
   } catch (err: any) {
-    console.error("Critical Server Error:", err);
+    console.error("Critical:", err);
     return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: corsHeaders });
   }
 }
 
-console.log("✅ 2025 Bifurcated Server Running...");
+console.log("✅ SYSTEM ONLINE: Nexari Space Connected.");
 serve(handler);
