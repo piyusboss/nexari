@@ -1,13 +1,18 @@
-// server.ts — True Streaming Proxy (No Buffering)
+// server.ts — Final Fix for Incomplete VIP Responses
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
 
 const HF_API_KEY = Deno.env.get("HF_API_KEY") ?? "";
 const SHARED_SECRET = "NEXARI_SECURE_HANDSHAKE_KEY_2025"; 
 
-// === CONFIG ===
+if (!HF_API_KEY) { console.error("❌ HF_API_KEY missing."); Deno.exit(1); }
+
+// === MODEL MAPPING ===
 const MODELS: Record<string, string> = {
+  // 🟢 PERSONAL SPACE (Custom)
   "Nexari-G1": "https://piyush-boss-nexari-server.hf.space/v1/chat/completions",
+  
+  // 🟠 VIP ROUTER (Official High-Speed)
   "DeepSeek-R1": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
   "Qwen2.5-72B": "Qwen/Qwen2.5-72B-Instruct", 
 };
@@ -19,18 +24,19 @@ const corsHeaders = {
   "access-control-allow-headers": "Content-Type, Authorization, X-Nexari-Token",
 };
 
+// --- AUTH ---
 function verifyToken(authHeader: string | null): boolean {
   if (!authHeader) return false;
   try {
-    const [p, s] = authHeader.split(".");
-    if (!p || !s) return false;
+    const [payloadB64, signature] = authHeader.split(".");
+    if (!payloadB64 || !signature) return false;
     const hmac = createHmac("sha256", SHARED_SECRET);
-    hmac.update(p);
-    if (s !== hmac.digest("hex")) return false;
-    return JSON.parse(atob(p)).exp > Math.floor(Date.now()/1000);
+    hmac.update(payloadB64);
+    return signature === hmac.digest("hex");
   } catch { return false; }
 }
 
+// --- HANDLER ---
 async function handler(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
   
@@ -42,23 +48,33 @@ async function handler(req: Request): Promise<Response> {
   try { body = await req.json(); } catch { return new Response("Bad JSON", { status: 400 }); }
 
   let modelKey = body.model || DEFAULT_MODEL;
-  let targetEndpoint = MODELS[modelKey] || MODELS[DEFAULT_MODEL];
-  let isCustomSpace = targetEndpoint.includes("hf.space");
-  
-  // URL Determine karo
-  let finalUrl = isCustomSpace ? targetEndpoint : "https://router.huggingface.co/v1/chat/completions";
+  let targetUrl = MODELS[modelKey] || MODELS[DEFAULT_MODEL];
+
+  // Logic Check
+  let isCustomSpace = targetUrl.includes("hf.space");
+  if (!isCustomSpace) {
+      targetUrl = "https://router.huggingface.co/v1/chat/completions";
+  }
+
+  // === 🧠 SMART LIMITS (DUAL FORCE) ===
+  // VIP Models ke liye 2048 tokens safe limit hai (4096 kabhi kabhi reject hota hai free tier par)
+  const tokenLimit = isCustomSpace ? 512 : 2048;
+
+  console.log(`🚀 Routing: ${modelKey} | Limit: ${tokenLimit}`);
 
   try {
-    // Payload prepare karo (Stream ON for everyone now)
+    // Payload: Hum 'max_tokens' aur 'max_new_tokens' DONO bhejenge
+    // Taaki Router confuse na ho.
     const payload = {
         model: isCustomSpace ? "tgi" : MODELS[modelKey], 
         messages: body.messages,
-        max_tokens: body.max_tokens || 512,
+        max_tokens: tokenLimit,       // OpenAI Standard
+        max_new_tokens: tokenLimit,   // Hugging Face Standard
         temperature: body.temperature || 0.7,
-        stream: true // <--- ZAROORI: Dono ke liye True karo
+        stream: true // Sabke liye Stream ON (Kyunki script.js ab sab sambhal leta hai)
     };
 
-    const res = await fetch(finalUrl, {
+    const res = await fetch(targetUrl, {
         method: "POST",
         headers: { 
             "Authorization": `Bearer ${HF_API_KEY}`, 
@@ -67,20 +83,18 @@ async function handler(req: Request): Promise<Response> {
         body: JSON.stringify(payload)
     });
 
-    // Error Check
     if (!res.ok) {
         const text = await res.text();
         if (res.status === 503) return new Response(JSON.stringify({ error: "Model Loading..." }), { status: 503, headers: corsHeaders });
         return new Response(JSON.stringify({ error: `HF Error: ${text}` }), { status: res.status, headers: corsHeaders });
     }
 
-    // === THE MAGIC: DIRECT PIPE (No Await Text) ===
-    // Hum response body ko seedha browser ko bhej rahe hain bina roke
+    // Direct Pipe (Zero Latency)
     return new Response(res.body, { 
         status: 200, 
         headers: { 
             ...corsHeaders, 
-            "Content-Type": "text/event-stream", // Browser ko batao stream aane wali hai
+            "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
             "Connection": "keep-alive"
         } 
