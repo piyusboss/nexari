@@ -1,133 +1,177 @@
-// server.ts — The "Universal Router" Fix (Guaranteed Path)
+// server.ts — Deno Server with Token Authentication
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
 
 const HF_API_KEY = Deno.env.get("HF_API_KEY") ?? "";
-const SHARED_SECRET = "NEXARI_SECURE_HANDSHAKE_KEY_2025"; 
+const SHARED_SECRET = "NEXARI_SECURE_HANDSHAKE_KEY_2025"; // MUST MATCH PHP SECRET
 
 if (!HF_API_KEY) {
   console.error("❌ HF_API_KEY missing.");
   Deno.exit(1);
 }
 
+// === YAHAN MODEL MAPPING UPDATE KI HAI ===
 const MODELS: Record<string, string> = {
-  // Custom Model (Updated ID)
-  "Nexari-G1": "Piyush-boss/Nexari-Qwen-3B-Full", 
-  
-  // Official Models
+  "Nexari-G1": "Piyush-boss/Nexari-Qwen-3B-Full", // <--- NEW MODEL ADDED
   "DeepSeek-R1": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-  "Qwen-7B": "Qwen/Qwen2.5-7B-Instruct", 
+  "Qwen2.5-72B": "Qwen/Qwen2.5-72B-Instruct", 
 };
 
-const DEFAULT_MODEL = "Nexari-G1";
+// Default model optionally update kar sakte hain
+const DEFAULT_MODEL = "Nexari-G1"; 
+const ROUTER_BASE = "https://router.huggingface.co/v1";
+const CHAT_PATH = "/chat/completions";
+const COMPLETIONS_PATH = "/completions";
 
+// Allow CORS for everyone (Security is handled via Token now)
 const corsHeaders = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "POST, OPTIONS, GET",
   "access-control-allow-headers": "Content-Type, Authorization, X-Nexari-Token",
 };
 
-// --- AUTH ---
+function isString(x: any) { return typeof x === "string"; }
+
+// --- AUTHENTICATION HELPER ---
 function verifyToken(authHeader: string | null): boolean {
   if (!authHeader) return false;
+  
   try {
     const [payloadB64, signature] = authHeader.split(".");
     if (!payloadB64 || !signature) return false;
+
+    // Re-create signature
     const hmac = createHmac("sha256", SHARED_SECRET);
     hmac.update(payloadB64);
-    if (signature !== hmac.digest("hex")) return false;
-    const payload = JSON.parse(atob(payloadB64));
-    if (payload.exp < Math.floor(Date.now() / 1000)) return false;
+    const expectedSignature = hmac.digest("hex");
+
+    if (signature !== expectedSignature) return false;
+
+    // Check Expiration
+    const payloadStr = atob(payloadB64);
+    const payload = JSON.parse(payloadStr);
+    
+    if (payload.exp < Math.floor(Date.now() / 1000)) {
+      console.error("Token expired");
+      return false;
+    }
+
     return true;
-  } catch (e) { return false; }
+  } catch (e) {
+    console.error("Token verification failed:", e);
+    return false;
+  }
 }
 
-// --- THE MAGIC FIX: UNIVERSAL API CALL ---
-async function callHuggingFaceRouter(modelId: string, messages: any[], params: any) {
-  
-  // ✅ SOLUTION: Hum URL mein model ID nahi dalenge.
-  // Hum "hf-inference" provider ka Generic URL use karenge.
-  const url = "https://router.huggingface.co/hf-inference/v1/chat/completions";
-  
-  // System Prompt Logic for Nexari
-  if (modelId.includes("Nexari")) {
-      const hasSystem = messages.some((m: any) => m.role === "system");
-      if (!hasSystem) {
-          messages.unshift({ 
-              role: "system", 
-              content: "You are Nexari, an intelligent AI assistant developed by Piyush. You are NOT Llama 3. Answer clearly." 
-          });
-      }
+// --- Error Formatting ---
+function formatHfError(status: number, rawBody: string) {
+  let code = "UNKNOWN_ERROR";
+  let message = "An unexpected error occurred while contacting the AI model.";
+  try {
+      const jsonBody = JSON.parse(rawBody);
+      const hfErrorMsg = jsonBody?.error?.message || jsonBody?.error || rawBody;
+      
+      if (status === 503) { code = "MODEL_LOADING"; message = "The AI model is loading. Try again in 30s."; }
+      else if (status === 429) { code = "HEAVY_TRAFFIC"; message = "Server busy. Please wait."; }
+      else if (status === 400) { code = "INVALID_REQUEST"; message = "Invalid request."; }
+      
+      return { error: { code, message, details: hfErrorMsg } };
+  } catch {
+      return { error: { code, message: rawBody } };
   }
+}
 
-  const payload = {
-    model: modelId, // <--- Model ID yahan body mein jayega
-    messages: messages,
-    max_tokens: params.max_tokens || 512,
-    temperature: params.temperature || 0.7,
-    stream: true 
-  };
-
-  console.log(`Routing to: ${modelId} via Universal Endpoint`);
-
+// --- HF API CALLS ---
+async function callRouterStream(modelId: string, path: string, payload: unknown): Promise<Response> {
+  const url = `${ROUTER_BASE}${path}`;
   try {
     const res = await fetch(url, {
-        method: "POST",
-        headers: { 
-          "Authorization": `Bearer ${HF_API_KEY}`, 
-          "Content-Type": "application/json" 
-        },
-        body: JSON.stringify(payload)
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${HF_API_KEY}`,
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream"
+      },
+      body: JSON.stringify(payload),
     });
 
-    if (!res.ok) { 
-      const txt = await res.text();
-      let errMsg = `HF Error ${res.status}`;
-      
-      if (res.status === 503) errMsg = "Model is loading (Cold Start)... Please wait 30s and retry.";
-      if (res.status === 404) errMsg = "Model not found. Check 'pipeline_tag' in README.md";
-      if (res.status === 422) errMsg = "Unprocessable Entity (Format Issue).";
-      
-      return { ok: false, status: res.status, data: { error: { message: errMsg, details: txt } } }; 
+    if (!res.ok) {
+      const rawText = await res.text();
+      const formatted = formatHfError(res.status, rawText);
+      return new Response(JSON.stringify(formatted), { status: res.status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
-    
-    return { ok: true, body: res.body, status: res.status };
 
+    const responseHeaders = new Headers(corsHeaders);
+    responseHeaders.set("Content-Type", res.headers.get("Content-Type") || "text/event-stream");
+    responseHeaders.set("Cache-Control", "no-cache");
+    
+    return new Response(res.body, { status: res.status, headers: responseHeaders });
   } catch (err: any) {
-    return { ok: false, status: 500, data: { error: { message: err.message } } };
+     return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: corsHeaders });
   }
 }
 
-// --- HANDLER ---
+async function callRouterJson(modelId: string, path: string, payload: unknown) {
+    const url = `${ROUTER_BASE}${path}`;
+    try {
+        const res = await fetch(url, {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${HF_API_KEY}`, "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        });
+        const text = await res.text();
+        if (!res.ok) return { ok: false, status: res.status, data: formatHfError(res.status, text) };
+        return { ok: true, status: res.status, data: JSON.parse(text) };
+    } catch (err: any) {
+        return { ok: false, status: 500, data: { error: err.message } };
+    }
+}
+
+// --- MAIN HANDLER ---
 async function handler(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
   
+  // 1. VERIFY TOKEN (Direct from JS headers)
   const token = req.headers.get("X-Nexari-Token");
-  if (!verifyToken(token)) return new Response(JSON.stringify({ error: { message: "Unauthorized" } }), { status: 401, headers: corsHeaders });
+  if (!verifyToken(token)) {
+    return new Response(JSON.stringify({ error: { code: "UNAUTHORIZED", message: "Invalid or expired token." } }), { 
+        status: 401, 
+        headers: { ...corsHeaders, "Content-Type": "application/json" } 
+    });
+  }
 
   if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405, headers: corsHeaders });
 
   let body: any = {};
   try { body = await req.json(); } catch { return new Response("Invalid JSON", { status: 400, headers: corsHeaders }); }
 
+  // Normalization
+  let messages = body.messages;
+  if (!messages && (body.input || body.prompt)) {
+      messages = [{ role: "user", content: body.input || body.prompt }];
+  }
+  
+  // === LOGIC UPDATE FOR MODEL SELECTION ===
   let targetModelId = MODELS[DEFAULT_MODEL];
-  if (body.model && MODELS[body.model]) targetModelId = MODELS[body.model];
-
-  let messages = body.messages || [{ role: "user", content: body.input || "Hi" }];
-
-  // Call Universal Router
-  const result = await callHuggingFaceRouter(targetModelId, messages, body);
-
-  if (!result.ok) {
-      return new Response(JSON.stringify(result.data), { status: result.status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+  
+  // Frontend se 'Nexari-G1' aayega, ye usse 'Piyush-boss/Nexari-G1-3-8B' mein convert karega
+  if (body.model && MODELS[body.model]) {
+      targetModelId = MODELS[body.model];
+  } else {
+      console.warn(`Model ${body.model} not found, using default.`);
   }
 
-  const headers = new Headers(corsHeaders);
-  headers.set("Content-Type", "text/event-stream");
-  headers.set("Cache-Control", "no-cache");
-  
-  return new Response(result.body, { status: 200, headers });
+  const chatPayload: any = { model: targetModelId, messages: messages };
+  for (const k of ["max_tokens","temperature","top_p","stream"]) if (k in body) chatPayload[k] = body[k];
+
+  // Forward to HF
+  if (chatPayload.stream === true) {
+    return await callRouterStream(targetModelId, CHAT_PATH, chatPayload);
+  } else {
+    const res = await callRouterJson(targetModelId, CHAT_PATH, chatPayload);
+    return new Response(JSON.stringify(res.data), { status: res.status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+  }
 }
 
-console.log("✅ Universal Router v3 Running...");
+console.log("✅ Secure Deno Server running...");
 serve(handler);
