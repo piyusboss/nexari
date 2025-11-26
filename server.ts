@@ -7,7 +7,7 @@ const SHARED_SECRET = "NEXARI_SECURE_HANDSHAKE_KEY_2025";
 
 // === CONFIG ===
 const MODELS: Record<string, string> = {
-  "Nexari-G1": "https://piyush-boss-nexari-server.hf.space/v1/chat/completions",
+  "Nexari-G1": "https://Nexari-Research-nexari-server.hf.space/v1/chat/completions",
   "DeepSeek-R1": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
   "Qwen2.5-72B": "Qwen/Qwen2.5-72B-Instruct", 
 };
