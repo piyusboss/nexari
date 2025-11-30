@@ -1,4 +1,4 @@
-// server.ts — Hybrid Mode (Stream for VIP, Wait for Custom)
+// server.ts — Streaming Fix for Nexari G1
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
 
@@ -42,24 +42,28 @@ async function handler(req: Request): Promise<Response> {
 
   let modelKey = body.model || DEFAULT_MODEL;
   let targetEndpoint = MODELS[modelKey] || MODELS[DEFAULT_MODEL];
+  
+  // Identify if it's our Custom Space (Nexari)
   let isCustomSpace = targetEndpoint.includes("hf.space");
   
+  // Decide Endpoint URL
   let finalUrl = isCustomSpace ? targetEndpoint : "https://router.huggingface.co/v1/chat/completions";
 
-  // === HYBRID LOGIC ===
-  // Custom Space = No Stream (Stable)
-  // VIP Models = Stream (Fast)
-  let useStream = !isCustomSpace; 
+  // === CRITICAL FIX ===
+  // Previously: let useStream = !isCustomSpace; (This caused the crash)
+  // New Logic: Always use stream because app.py is now strictly streaming SSE.
+  let useStream = true; 
 
-  console.log(`🚀 Target: ${modelKey} | Stream: ${useStream}`);
+  console.log(`🚀 Target: ${modelKey} | Custom: ${isCustomSpace} | Stream: ${useStream}`);
 
   try {
     const payload = {
         model: isCustomSpace ? "tgi" : MODELS[modelKey], 
         messages: body.messages,
-        max_tokens: isCustomSpace ? 256 : 2048, // Custom ke liye limit taaki timeout na ho
+        // Custom Space needs lower tokens to avoid CPU timeout during stream setup
+        max_tokens: isCustomSpace ? 512 : 2048, 
         temperature: body.temperature || 0.7,
-        stream: useStream // <--- Critical Switch
+        stream: true // Force Stream ON
     };
 
     const res = await fetch(finalUrl, {
@@ -73,29 +77,23 @@ async function handler(req: Request): Promise<Response> {
 
     // === Handling Responses ===
     
-    // 1. Agar Error hai
     if (!res.ok) {
         const text = await res.text();
         if (res.status === 503) return new Response(JSON.stringify({ error: { code: "LOADING", message: "Model is warming up..." } }), { status: 503, headers: corsHeaders });
         return new Response(JSON.stringify({ error: `Upstream Error: ${text}` }), { status: res.status, headers: corsHeaders });
     }
 
-    // 2. Agar Stream Hai (VIP) -> Direct Pipe
-    if (useStream) {
-        return new Response(res.body, { 
-            status: 200, 
-            headers: { ...corsHeaders, "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" } 
-        });
-    } 
-    
-    // 3. Agar JSON Hai (Nexari) -> Wait & Send
-    else {
-        const jsonResponse = await res.json();
-        return new Response(JSON.stringify(jsonResponse), { 
-            status: 200, 
-            headers: { ...corsHeaders, "Content-Type": "application/json" } 
-        });
-    }
+    // Since we forced stream=true, we ALWAYS pipe the body directly.
+    // No more `await res.json()` which was causing the "Unexpected token d" error.
+    return new Response(res.body, { 
+        status: 200, 
+        headers: { 
+            ...corsHeaders, 
+            "Content-Type": "text/event-stream", 
+            "Cache-Control": "no-cache", 
+            "Connection": "keep-alive" 
+        } 
+    });
 
   } catch (err: any) {
     return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: corsHeaders });
